@@ -1,0 +1,8 @@
+# isiklikud andmed (luuakse kasutamisel)
+*.json
+mangukaust.txt
+# release'i zipis (liiga suured repo jaoks)
+tools/python/
+tools/vrf/
+tools/7zip/
+*.zip

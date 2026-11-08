@@ -1,0 +1,1 @@
+This file makes the app use the simple layout (only 'All mods'). Keep it.
