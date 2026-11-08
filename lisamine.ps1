@@ -158,6 +158,7 @@ function Get-StaleShared($vpk, $paths, $log) {
 # $state.Old = leiti vana kaamera; $state.Fixed = parandati; $state.Failed = vana, aga ei saanud parandada.
 function Repair-Camera($vpk, $paths, $state, $log) {
     if (-not (Test-Path $S2V)) { return $null }
+    if (-not (Test-Path -LiteralPath (Join-Path $Citadel 'pak01_dir.vpk'))) { [void]$log.Add('Camera not checked: game file pak01_dir.vpk not found.'); return $null }
     $vanSet = $script:VanillaPaths
     if (-not $vanSet) {
         $vanSet = @{}; foreach ($p in (Get-VpkPaths (Join-Path $Citadel 'pak01_dir.vpk'))) { $vanSet[$p] = 1 }
@@ -228,7 +229,7 @@ function Move-ParentUp($parentId, [int]$count) {
     if ($p.Files.Count -lt $count) { throw "The alt has more files ($count) than its mod ($($p.Files.Count))." }
     if (Get-Process deadlock -ErrorAction SilentlyContinue) { throw 'Close Deadlock first (the mod file has to be renamed).' }
     $oldNums = @($p.Files | ForEach-Object { [int]($_.Pak -replace '\D', '') })
-    $newNums = @(Get-FreePaks $p.Files.Count)
+    $newNums = Get-FreePaks $p.Files.Count   # (funktsioon tagastab juba massiivi; @() tegi massiivi massiivis)
     for ($i = 0; $i -lt $p.Files.Count; $i++) {
         $from = Join-Path $Addons $p.Files[$i].Pak
         $to = Join-Path $Addons ('pak{0:D2}_dir.vpk' -f [int]$newNums[$i])
@@ -311,7 +312,7 @@ function Show-AddDialog($defaultName, $hero, $log) {
     $par.Add_SelectedIndexChanged({
         $isAlt = $par.SelectedIndex -ne 0
         $dest.Visible = -not $isAlt; $destLabel.Visible = -not $isAlt
-        $style.Visible = $isAlt; $styleLabel.Visible = $isAlt
+        $style.Visible = $isAlt -and -not $Portable; $styleLabel.Visible = $isAlt -and -not $Portable   # jagatavas: alati "+ …" nupp
     })
     # Kontrolli tulemus (lüliti leidis need ise; siia ei kirjutata): pealkiri + keritav infokast
     $infoHead = New-Object Windows.Forms.Label

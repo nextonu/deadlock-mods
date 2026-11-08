@@ -1,9 +1,10 @@
-// Deadlock modide lüliti joonistatud osad: ümarad kaardid, nupud ja otsingukast.
+﻿// Deadlock modide lüliti joonistatud osad: ümarad kaardid, nupud ja otsingukast.
 // DeadlockModToggle.ps1 laeb selle Add-Type'iga (C# 5, .NET Framework).
 using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace DlUi
@@ -55,7 +56,7 @@ namespace DlUi
             Bg = Hex("#16161A"); PageBg = Hex("#B8AA8E");
             Panel = Hex("#E0D4BB"); PanelHover = Hex("#E9DEC8"); Raised = Hex("#CFC1A5"); Hover = Hex("#C4B598");
             Line = Hex("#9C8D70"); Line2 = Hex("#8C7D61"); LineHover = Hex("#665944");
-            Text = Hex("#2E2822"); Bright = Hex("#14110D"); Muted = Hex("#6B5F4E");
+            Text = Hex("#2E2822"); Bright = Hex("#14110D"); Muted = Hex("#463C30");   // (oli #6B5F4E: liiga hele beežil taustal)
             HeadText = Hex("#E6DECF"); HeadBright = Hex("#FFFFFF"); HeadMuted = Hex("#9C9384");
             Brand = Hex("#E2B456"); BrandHover = Hex("#F0C46A"); OnFill = Hex("#E9C77A"); OnHover = Hex("#F0D08A");
             OnLine = Hex("#B98A2A"); Ink = Hex("#15100A");
@@ -369,6 +370,11 @@ namespace DlUi
         static Timer prewarm;
         static void PrewarmTick(object s, EventArgs e)
         {
+            var pw = System.Diagnostics.Stopwatch.StartNew();
+            try { PrewarmInner(); } finally { Perf.Add("prewarm", pw); }
+        }
+        static void PrewarmInner()
+        {
             foreach (var f in flows) if (f.animating || f.usingSnap) return;
             foreach (var f in flows.ToArray())
                 if (!f.IsDisposed && f.IsHandleCreated && f.view != null && f.HasPending) { f.EnsureSnapshot(2, false); return; }
@@ -507,6 +513,7 @@ namespace DlUi
         public static Card DebugHover;   // testimiseks: teeskle, et hiir on selle kaardi peal
         static Timer timer;
         static readonly List<Card> all = new List<Card>();
+        public static List<Card> All { get { return all; } }
 
         public Card()
         {
@@ -518,7 +525,7 @@ namespace DlUi
         }
 
         // kaart ja tema lapsed (sildid, nupud) joonistatakse korraga -> tõusmisel ei vilgu
-        public static bool CompositedCards = true;
+        public static bool CompositedCards = false;   // välja: tegi akna lohistamise aeglaseks (Windows joonistas kogu akna iga liigutusega); vilkumist hoiab ära CardFlow + LiftPx=0
         protected override CreateParams CreateParams { get { var cp = base.CreateParams; if (CompositedCards) cp.ExStyle |= 0x02000000; return cp; } }
 
         protected override void Dispose(bool disposing)
@@ -533,6 +540,11 @@ namespace DlUi
         }
 
         static void Tick(object s, EventArgs e)
+        {
+            var pw = System.Diagnostics.Stopwatch.StartNew();
+            try { TickInner(); } finally { Perf.Add("cardTick", pw); }
+        }
+        static void TickInner()
         {
             Point c = Cursor.Position;
             foreach (var k in all)
@@ -578,7 +590,7 @@ namespace DlUi
             using (var g = Graphics.FromImage(cache)) { g.Clear(Color.Transparent); PaintCard(g); }
             cacheKey = Key;
         }
-        protected override void OnPaint(PaintEventArgs e) { PaintBackdrop(e.Graphics); }
+        protected override void OnPaint(PaintEventArgs e) { var pw = System.Diagnostics.Stopwatch.StartNew(); PaintBackdrop(e.Graphics); Perf.Add("cardPaint", pw); }
         // Kaardi pilt (vahemälust või elavalt). Kaardi sees olev nuppude paneel (CardFlow) joonistab oma tausta
         // siit, mitte Windowsi "läbipaistva" tausta kaudu - see andis hoveri ajal vahel halli ristküliku.
         public void PaintBackdrop(Graphics g)
@@ -744,7 +756,7 @@ namespace DlUi
                      ControlStyles.ResizeRedraw, true);
             Width = 16;
             tm = new Timer(); tm.Interval = 30;
-            tm.Tick += (s, e) => { int p = Pos, m = Max; if (p != lastPos || m != lastMax || Height != lastH) { lastPos = p; lastMax = m; lastH = Height; Invalidate(); } };
+            tm.Tick += (s, e) => { var pw = System.Diagnostics.Stopwatch.StartNew(); int p = Pos, m = Max; if (p != lastPos || m != lastMax || Height != lastH) { lastPos = p; lastMax = m; lastH = Height; Invalidate(); } Perf.Add("scrollbar", pw); };
             tm.Start();
         }
         protected override void Dispose(bool disposing) { if (disposing && tm != null) { tm.Stop(); tm.Dispose(); } base.Dispose(disposing); }
@@ -898,7 +910,7 @@ namespace DlUi
         {
             get
             {
-                if (Marked) return OnOff ? "✕  Delete" : "✕  " + Text;
+                if (Marked) return OnOff ? MarkSymbol + "  " + MarkWord : MarkSymbol + "  " + Text;
                 return OnOff ? (chk ? "✓  On" : "Off") : (chk ? "✓  " + Text : Text);
             }
         }
@@ -919,10 +931,14 @@ namespace DlUi
         public Color Accent = Color.Empty;   // kategooria värv (Deadlocki teemas)
 
         // Kustutamisrežiim: hiire all olev nupp läheb punaseks (kõigil nuppudel korraga).
-        public static bool DeleteMode;
-        public bool Marked;   // märgitud kustutamiseks (punane)
+        public static bool DeleteMode;   // valikurežiim (kustuta / kontrolli / uuenda / vahelehele) on sees
+        public bool Marked;   // märgitud (režiimi värviga)
+        // Valikurežiimi välimus: kustutamine punane "✕", kontroll sinine "✓", uuendused roheline, vaheleht lilla "+"
+        public static Color MarkColor = G.Hex("#B83224");
+        public static string MarkSymbol = "✕", MarkWord = "Delete";
         public string AltBadge = "";
         public bool AltOn;
+        public bool NoPic;    // modil pole oma pilti -> väike joon nupu all
         public event EventHandler AltClicked;
         bool hoverBadge;
 
@@ -933,6 +949,7 @@ namespace DlUi
             var r = BadgeRect; r.Inflate(4, 4);
             return r.Contains(p);
         }
+        public bool IsOnBadge(Point p) { return OnBadge(p); }   // paremklõps "n"-il: menüü on aldi jaoks
 
         protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
         protected override void OnMouseLeave(EventArgs e) { hover = false; hoverBadge = false; down = false; Invalidate(); base.OnMouseLeave(e); }
@@ -993,8 +1010,8 @@ namespace DlUi
                 if (chk) { fill = hover ? G.Mix(Accent, Color.White, 0.12f) : Accent; line = G.Mix(Accent, Color.Black, 0.25f); textCol = Color.White; }
                 else if (hover) line = G.Mix(G.Line2, Accent, 0.7f);
             }
-            if (DeleteMode && hover) { line = G.Hex("#E0412F"); fill = G.Deco ? G.Hex("#E9B9A8") : G.Hex("#3A2020"); }
-            if (Marked) { fill = hover ? G.Hex("#D4402F") : G.Hex("#B83224"); line = G.Hex("#7A1E15"); textCol = Color.White; }
+            if (DeleteMode && hover) { line = MarkColor; fill = G.Deco ? G.Mix(G.Panel, MarkColor, 0.25f) : G.Mix(G.Raised, MarkColor, 0.3f); }
+            if (Marked) { fill = hover ? G.Mix(MarkColor, Color.White, 0.12f) : MarkColor; line = G.Mix(MarkColor, Color.Black, 0.35f); textCol = Color.White; }
             using (var p = G.Round(r, r.Height / 2))
             {
                 using (var b = new SolidBrush(fill)) g.FillPath(b, p);
@@ -1003,6 +1020,12 @@ namespace DlUi
             TextRenderer.DrawText(g, Shown, Font, Rectangle.Round(r), textCol,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine |
                 TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+            // väike joon all: sellel modil pole veel oma pilti (paremklõps -> Picture…)
+            if (NoPic)
+            {
+                float lw = Math.Min(28f, r.Width * 0.3f), ly = r.Bottom - 3f;
+                using (var pen = new Pen(Color.FromArgb(150, textCol), 1.6f)) { pen.StartCap = LineCap.Round; pen.EndCap = LineCap.Round; g.DrawLine(pen, r.Left + (r.Width - lw) / 2, ly, r.Left + (r.Width + lw) / 2, ly); }
+            }
             if (!string.IsNullOrEmpty(AltBadge))
             {
                 var br = BadgeRect;
@@ -1075,6 +1098,207 @@ namespace DlUi
     }
 
     // Ümar raam otsingukastile; muutub kollaseks, kui kastis on fookus.
+    // Progressiriba (Windowsi roheline asemel): ümar rada, kuldne täide. Value/Maximum nagu ProgressBar.
+    public class Bar : Control
+    {
+        int val, max = 100;
+        public int Value { get { return val; } set { val = Math.Max(0, Math.Min(max, value)); Invalidate(); } }
+        public int Maximum { get { return max; } set { max = Math.Max(1, value); if (val > max) val = max; Invalidate(); } }
+        public Bar()
+        {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.SupportsTransparentBackColor, true);
+            BackColor = Color.Transparent; Height = 8;
+        }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
+            var r = new RectangleF(0.5f, 0.5f, Width - 1, Height - 1);
+            using (var p = G.Round(r, Height / 2f)) using (var b = new SolidBrush(G.Mix(G.Raised, Color.Black, 0.12f))) g.FillPath(b, p);
+            float w = (Width - 1) * (float)val / max;
+            if (w >= Height)
+                using (var p = G.Round(new RectangleF(0.5f, 0.5f, w, Height - 1), Height / 2f))
+                using (var b = new LinearGradientBrush(new RectangleF(0, 0, Math.Max(1, w), Height), G.Mix(G.Brand, Color.White, 0.15f), G.Mix(G.Brand, Color.Black, 0.12f), 90f))
+                    g.FillPath(b, p);
+        }
+    }
+
+    // Teatekast akna ülaosas: Kind 0 = töötab (kuld), 1 = korras (roheline), 2 = hoiatus (oranž), 3 = viga (punane)
+    public class Banner : Control
+    {
+        int kind;
+        public int Kind { get { return kind; } set { kind = value; Invalidate(); } }
+        public Banner()
+        {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.SupportsTransparentBackColor, true);
+            BackColor = Color.Transparent; Height = 44;
+        }
+        protected override void OnTextChanged(EventArgs e) { base.OnTextChanged(e); Invalidate(); }
+        Color KindColor { get { return kind == 1 ? G.Hex("#3F8F3A") : kind == 2 ? G.Hex("#C27A1A") : kind == 3 ? G.Hex("#B03A2E") : G.Brand; } }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
+            Color c = KindColor;
+            var r = new RectangleF(0.5f, 0.5f, Width - 1, Height - 1);
+            using (var p = G.Round(r, 10))
+            {
+                using (var b = new SolidBrush(G.Mix(G.Panel, c, 0.16f))) g.FillPath(b, p);
+                using (var pen = new Pen(G.Mix(G.Panel, c, 0.7f), 1.2f)) g.DrawPath(pen, p);
+            }
+            // vasakul värviline ring ikooniga
+            float d = Height - 18; var cr = new RectangleF(10, 9, d, d);
+            using (var b = new SolidBrush(c)) g.FillEllipse(b, cr);
+            string icon = kind == 1 ? "✓" : kind == 2 ? "!" : kind == 3 ? "✕" : "…";
+            using (var f = new Font("Segoe UI", d * 0.5f, FontStyle.Bold, GraphicsUnit.Pixel))
+                TextRenderer.DrawText(g, icon, f, Rectangle.Round(cr), Color.White, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            var tr = new Rectangle((int)(cr.Right + 10), 2, Width - (int)cr.Right - 18, Height - 4);
+            TextRenderer.DrawText(g, Text, Font, tr, G.Bright, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.WordBreak | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+        }
+    }
+
+    // Nimekiri teema värvides: päis kaardi tooniga, kõrgemad read (ruumi), ülejäänu joonistab Windows ise.
+    public static class ListStyle
+    {
+        public static void Apply(ListView lv, int rowHeight)
+        {
+            lv.OwnerDraw = true;
+            var il = new ImageList(); il.ImageSize = new Size(1, rowHeight); lv.SmallImageList = il;
+            lv.DrawColumnHeader += (s, e) =>
+            {
+                using (var b = new SolidBrush(G.Mix(G.Raised, Color.Black, 0.06f))) e.Graphics.FillRectangle(b, e.Bounds);
+                using (var p = new Pen(G.Line)) { e.Graphics.DrawLine(p, e.Bounds.Left, e.Bounds.Bottom - 1, e.Bounds.Right, e.Bounds.Bottom - 1); e.Graphics.DrawLine(p, e.Bounds.Right - 1, e.Bounds.Top + 5, e.Bounds.Right - 1, e.Bounds.Bottom - 6); }
+                var r = e.Bounds; r.Inflate(-6, 0);
+                using (var f = new Font(lv.Font, FontStyle.Bold))
+                    TextRenderer.DrawText(e.Graphics, e.Header.Text, f, r, G.Bright, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+            };
+            lv.DrawItem += (s, e) => { e.DrawDefault = true; };
+            lv.DrawSubItem += (s, e) => { e.DrawDefault = true; };
+        }
+    }
+
+    // Lõpu teade: heli + tegumiriba vilkumine, kui rakendus pole ees (nt minimeeritud)
+    public static class Notify
+    {
+        [StructLayout(LayoutKind.Sequential)] struct FLASHWINFO { public uint cbSize; public IntPtr hwnd; public uint dwFlags; public uint uCount; public uint dwTimeout; }
+        [DllImport("user32.dll")] static extern bool FlashWindowEx(ref FLASHWINFO f);
+        public static void Done(Form f, bool problems)
+        {
+            try { if (problems) System.Media.SystemSounds.Exclamation.Play(); else System.Media.SystemSounds.Asterisk.Play(); } catch { }
+            if (f == null || !f.IsHandleCreated) return;
+            if (Form.ActiveForm == null || f.WindowState == FormWindowState.Minimized)
+            {
+                var w = new FLASHWINFO(); w.cbSize = (uint)Marshal.SizeOf(typeof(FLASHWINFO)); w.hwnd = f.Handle;
+                w.dwFlags = 3 | 12; w.uCount = 0; w.dwTimeout = 0;   // pealkiri + tegumiriba, kuni aken ette tuuakse
+                FlashWindowEx(ref w);
+            }
+        }
+    }
+
+    // Akna lohistamine / suuruse muutmine: kaartide WS_EX_COMPOSITED sunnib iga liigutuse ajal kogu akent
+    // uuesti joonistama ja aken "lohiseb" kursorile järele. Liigutamise ajaks lülitatakse see välja.
+    public class MoveWatcher : NativeWindow
+    {
+        [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr h, int i);
+        [DllImport("user32.dll")] static extern int SetWindowLong(IntPtr h, int i, int v);
+        public static int Moves;
+        public static void Attach(Form f) { var w = new MoveWatcher(); w.AssignHandle(f.Handle); f.HandleDestroyed += (s, e) => w.ReleaseHandle(); }
+        public static void SetComposited(bool on)
+        {
+            foreach (var c in Card.All)
+            {
+                if (c.IsDisposed || !c.IsHandleCreated) continue;
+                int ex = GetWindowLong(c.Handle, -20);
+                int nx = on ? (ex | 0x02000000) : (ex & ~0x02000000);
+                if (nx != ex) SetWindowLong(c.Handle, -20, nx);
+            }
+        }
+        // Mõõtmine: lohistamise ajal WM_MOVING teadete vahed (kui suured -> rakendus on vahepeal kinni) -> %TEMP%\dlmods_move.log
+        static System.Diagnostics.Stopwatch sw = new System.Diagnostics.Stopwatch();
+        static double lastMs, maxGap, sumGap; static int nMoving, slow;
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == 0x231)        // WM_ENTERSIZEMOVE
+            {
+                Moves++; SetComposited(false);
+                sw.Restart(); lastMs = 0; maxGap = 0; sumGap = 0; nMoving = 0; slow = 0; Perf.Reset();
+            }
+            else if (m.Msg == 0x216 || m.Msg == 0x214)   // WM_MOVING / WM_SIZING
+            {
+                double t = sw.Elapsed.TotalMilliseconds, gap = t - lastMs; lastMs = t;
+                if (nMoving > 0) { sumGap += gap; if (gap > maxGap) maxGap = gap; if (gap > 33) slow++; }
+                nMoving++;
+            }
+            else if (m.Msg == 0x232)   // WM_EXITSIZEMOVE
+            {
+                SetComposited(Card.CompositedCards);
+                try
+                {
+                    string line = string.Format("{0:HH:mm:ss} drag {1:0} ms: {2} moves, avg gap {3:0.0} ms, max gap {4:0.0} ms, gaps>33ms: {5}; timers: {6}{7}",
+                        DateTime.Now, sw.Elapsed.TotalMilliseconds, nMoving, nMoving > 1 ? sumGap / (nMoving - 1) : 0, maxGap, slow, Perf.Report(), Environment.NewLine);
+                    System.IO.File.AppendAllText(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "dlmods_move.log"), line);
+                }
+                catch { }
+            }
+            base.WndProc(ref m);
+        }
+    }
+
+    // Automaatne kärbe: kus pildil on "tegelane"? Väikesel koopial detailsus (servad) + värvikus; aken (kaardi kujuga)
+    // pannakse kohta, kus seda on kõige rohkem (kerge eelistus keskele ja ülemisele osale - nägu).
+    // Tagastab kärpe keskpunkti 0..1 pildi laiuse/kõrguse suhtes.
+    public static class AutoCrop
+    {
+        public static PointF Find(Image src, float aspect, float zoom)
+        {
+            int W = 96, H = Math.Max(8, (int)Math.Round(src.Height * 96.0 / src.Width));
+            var e = new double[W, H];
+            using (var b = new Bitmap(W, H))
+            {
+                using (var g = Graphics.FromImage(b)) { g.InterpolationMode = InterpolationMode.HighQualityBilinear; g.DrawImage(src, 0, 0, W, H); }
+                var lum = new double[W, H]; var sat = new double[W, H];
+                for (int y = 0; y < H; y++) for (int x = 0; x < W; x++)
+                {
+                    var c = b.GetPixel(x, y);
+                    lum[x, y] = 0.299 * c.R + 0.587 * c.G + 0.114 * c.B;
+                    int mx = Math.Max(c.R, Math.Max(c.G, c.B)), mn = Math.Min(c.R, Math.Min(c.G, c.B));
+                    sat[x, y] = mx == 0 ? 0 : (mx - mn) * 255.0 / mx;
+                }
+                for (int y = 1; y < H - 1; y++) for (int x = 1; x < W - 1; x++)
+                    e[x, y] = Math.Abs(lum[x + 1, y] - lum[x - 1, y]) + Math.Abs(lum[x, y + 1] - lum[x, y - 1]) + 0.35 * sat[x, y];
+            }
+            // integraalpilt
+            var I = new double[W + 1, H + 1];
+            for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) I[x + 1, y + 1] = e[x, y] + I[x, y + 1] + I[x + 1, y] - I[x, y];
+            double cw, ch;
+            if ((double)W / H > aspect) { ch = H; cw = H * aspect; } else { cw = W; ch = W / aspect; }
+            cw /= Math.Max(1, zoom); ch /= Math.Max(1, zoom);
+            int iw = Math.Max(1, (int)cw), ih = Math.Max(1, (int)ch);
+            double best = double.MinValue; int bx = (W - iw) / 2, by = (H - ih) / 2;
+            double total = I[W, H] + 1;
+            for (int y = 0; y + ih <= H; y++) for (int x = 0; x + iw <= W; x++)
+            {
+                double s = (I[x + iw, y + ih] - I[x, y + ih] - I[x + iw, y] + I[x, y]) / total;
+                double dx = (x + iw / 2.0) / W - 0.5, dy = (y + ih / 2.0) / H - 0.42;
+                s -= 0.08 * Math.Abs(dx) + 0.05 * Math.Abs(dy);
+                if (s > best) { best = s; bx = x; by = y; }
+            }
+            return new PointF((float)((bx + iw / 2.0) / W), (float)((by + ih / 2.0) / H));
+        }
+    }
+
+    // Mõõtmine (testideks): taimerite kestus. Perf.Report() -> "nimi: n korda, kokku ms, max ms"
+    public static class Perf
+    {
+        static readonly Dictionary<string, double[]> d = new Dictionary<string, double[]>();
+        public static void Add(string k, System.Diagnostics.Stopwatch w)
+        {
+            double ms = w.Elapsed.TotalMilliseconds; double[] v;
+            if (!d.TryGetValue(k, out v)) { v = new double[3]; d[k] = v; }
+            v[0]++; v[1] += ms; if (ms > v[2]) v[2] = ms;
+        }
+        public static void Reset() { d.Clear(); }
+        public static string Report() { var sb = new System.Text.StringBuilder(); foreach (var kv in d) sb.AppendFormat("{0}: {1} x, total {2:0.0} ms, max {3:0.0} ms; ", kv.Key, kv.Value[0], kv.Value[1], kv.Value[2]); return sb.ToString(); }
+    }
+
     public class Frame : Panel
     {
         public bool Focused2;

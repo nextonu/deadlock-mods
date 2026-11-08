@@ -37,6 +37,9 @@ if (-not $Citadel) {
 }
 $Addons  = Join-Path $Citadel 'addons'
 $Off     = Join-Path $Citadel 'addons_off'
+# Väljas olevate modide kaust võib olla mujal (nt D kettal, et C-l ruumi oleks): fail valjas_kaust.txt. Mäng seda kausta ei loe.
+$OffCfg = Join-Path $PSScriptRoot 'valjas_kaust.txt'
+if (-not $env:DLTEST -and (Test-Path -LiteralPath $OffCfg)) { $x = ([IO.File]::ReadAllText($OffCfg)).Trim(); if ($x) { $Off = $x } }
 foreach ($d in @($Addons, $Off)) { if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Force $d | Out-Null } }
 $Sqooky  = ''   # (ainult originaalis)
 # Valve'i puhta gameinfo.gi räsi, mille peale Sqooky v3.8 sobib. Kui uuendus muudab faili, on räsi teine -> küsi Claude'ilt.
@@ -129,9 +132,11 @@ function Set-Files($files, [bool]$on) {
         $a = Join-Path $Addons $f.Pak; $o = Join-Path $Off $f.Off
         if ($on -and -not (Test-Path -LiteralPath $a)) {
             if (-not (Test-Path -LiteralPath $o)) { throw "Faili ei leitud: $o" }
+            $note.Text = "⏳  Saving: $($f.Off)  ($([Math]::Round((Get-Item -LiteralPath $o).Length / 1MB)) MB)"; $note.ForeColor = $G::Brand; $note.Refresh()   # (teise kettale kopeerimine võtab aega)
             Move-Item -LiteralPath $o -Destination $a
         } elseif (-not $on -and (Test-Path -LiteralPath $a)) {
             if (Test-Path -LiteralPath $o) { throw "File exists in both folders: $($f.Off)" }
+            $note.Text = "⏳  Saving: $($f.Off)  ($([Math]::Round((Get-Item -LiteralPath $a).Length / 1MB)) MB)"; $note.ForeColor = $G::Brand; $note.Refresh()
             Move-Item -LiteralPath $a -Destination $o
         }
     }
@@ -177,11 +182,18 @@ function Set-Mod($id, [bool]$on) {
     }
     # Other-vahelehe skinni maha võtmine paneb sama kangelase skinni, mis Otheris pole (Swap, muidu juhuslik).
     # Kui sellist pole, jääb kangelane ilma. Mujalt maha võttes midagi asemele ei tule.
+    # Kui see skinn polnud mängus sees (kasutaja võtab oma klõpsu tagasi), minnakse tagasi mängus olevale
+    # olekule: teine sama kangelase skinn, mis mängus sees on, või mitte midagi (muidu jäi "1 unsaved change").
     if (-not $on -and $State[$id] -and $m.Hero -and ($SkinTab -contains $id)) {
-        $next = $m.Swap
-        if (-not $next) {
-            $others = @($Mods | Where-Object { $_.Hero -eq $m.Hero -and $_.Id -ne $id -and ($SkinTab -notcontains $_.Id) } | ForEach-Object { $_.Id })
-            if ($others.Count) { $next = $others | Get-Random }
+        $next = $null
+        $inGame = @($Mods | Where-Object { $_.Hero -eq $m.Hero -and $_.Id -ne $id -and -not $_.Parent -and (Test-On $_) } | ForEach-Object { $_.Id })
+        if ($inGame.Count) { $next = $inGame[0] }
+        elseif (Test-On $m) {
+            $next = $m.Swap
+            if (-not $next) {
+                $others = @($Mods | Where-Object { $_.Hero -eq $m.Hero -and $_.Id -ne $id -and ($SkinTab -notcontains $_.Id) } | ForEach-Object { $_.Id })
+                if ($others.Count) { $next = $others | Get-Random }
+            }
         }
         if ($next) { $State[$id] = $false; Set-Mod $next $true }
     }
@@ -265,6 +277,41 @@ function Get-HeroImage($name) {
     }
     return $ImgCache[$k]
 }
+# Modi enda pilt (paremklõps -> Picture, vt pildid.ps1): pildid\<id>.png. Laetakse mälust (fail ei jää lukku).
+$ModPicDir = Join-Path $PSScriptRoot 'pildid'
+$ModPicCache = @{}
+function Read-ImageNoLock($path) {
+    $bytes = [IO.File]::ReadAllBytes($path)
+    $img = [Drawing.Image]::FromStream((New-Object IO.MemoryStream(, $bytes)))
+    $bmp = New-Object Drawing.Bitmap $img; $img.Dispose(); return $bmp
+}
+function Get-ModPicture($id) {
+    $p = Join-Path $ModPicDir "$id.png"
+    if (-not (Test-Path -LiteralPath $p)) { $ModPicCache.Remove($id); return $null }
+    $t = (Get-Item -LiteralPath $p).LastWriteTimeUtc.Ticks
+    $c = $ModPicCache[$id]
+    if (-not $c -or $c.T -ne $t) { $c = @{ T = $t; Img = (Read-ImageNoLock $p) }; $ModPicCache[$id] = $c }
+    return $c.Img
+}
+# Kelle pilti kaart näitab: sees olev mod, ja kui tema alt ("n" / "+") on sees ja sellel on oma pilt, siis alt.
+# Ühe modiga kaardil see mod (ja tema sees olev alt). $null = keegi pole sees (mitme modiga kaart).
+function Get-CardShownMod($row) {
+    $main = @($row | Where-Object { $State[$_] })[0]
+    if (-not $main -and @($row).Count -eq 1) { $main = $row[0] }
+    if (-not $main) { return $null }
+    foreach ($c in $Mods) { if ($c.Parent -eq $main -and $State[$c.Id] -and (Test-Path -LiteralPath (Join-Path $ModPicDir "$($c.Id).png"))) { return $c.Id } }
+    return $main
+}
+# Kaardi pilt: sees oleva modi (või tema sees oleva aldi) pilt; ühe modiga kaardil tema pilt; muidu kangelase pilt; muidu mõne modi pilt
+function Get-CardPicture($row, $heroImg) {
+    $id = Get-CardShownMod $row
+    if ($id) { $p = Get-ModPicture $id; if ($p) { return $p } }
+    foreach ($id in $row) { if ($State[$id]) { $p = Get-ModPicture $id; if ($p) { return $p } } }
+    if (@($row).Count -eq 1) { $p = Get-ModPicture $row[0]; if ($p) { return $p } }
+    if ($heroImg) { return $heroImg }
+    foreach ($id in $row) { $p = Get-ModPicture $id; if ($p) { return $p } }
+    return $null
+}
 # Kangelase nimi kaardile ja pildile: nimes sulgudes, või (lülitist lisatud modidel) Hero võtme järgi.
 function Get-HeroName($mod) {
     if ($mod.Name -match '\(([^)]*)\)') { return $Matches[1] }
@@ -287,6 +334,7 @@ function Update-Boxes {
     foreach ($c in $Cards) {
         $on = Test-RowOn $c.Row
         if ($c.Card.On -ne $on) { $c.Card.On = $on; $c.Card.Invalidate() }
+        if ($c.Card.Picture) { $pic = Get-CardPicture $c.Row $c.HeroImg; if ($pic -and -not [object]::ReferenceEquals($pic, $c.Card.Picture)) { $c.Card.Picture = $pic; $c.Card.Invalidate() } }
         $c.Title.ForeColor = if ($on) { $G::Bright } else { $G::Text }
     }
     foreach ($a in $AllBoxes) {
@@ -324,6 +372,7 @@ $form.StartPosition = 'CenterScreen'
 $wa = [Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $form.ClientSize = New-Object Drawing.Size(846,[Math]::Min(880, $wa.Height - 60))
 $form.MinimumSize = New-Object Drawing.Size(500, 520)
+$form.Add_HandleCreated({ [DlUi.MoveWatcher]::Attach($this) })   # sujuv lohistamine (vt ui.cs MoveWatcher)
 $form.Add_HandleCreated({ $v = 1; [void][DlToggle.Native]::DwmSetWindowAttribute($this.Handle, 20, [ref]$v, 4) })
 
 # Päis
@@ -418,7 +467,11 @@ function Show-Tab($i, [bool]$instant) {
     $script:CurTab = $i
     for ($j = 0; $j -lt $TabBtns.Count; $j++) {
         $t = $TabBtns[$j]; $sel = ($j -eq $i)
-        $t.Page.Parent.Visible = $sel
+        # Aknas on ainult valitud vahelehe sisu. Teised võetakse aknast välja (WinForms hoiab nende aknad alles
+        # "parkimisaknas", vahetus on ikka kiire): peidetud alamaknad tegid akna lohistamise aeglaseks.
+        $clip = $t.Page.Parent
+        if ($sel) { if ($clip.Parent -ne $content) { $content.Controls.Add($clip) }; $clip.Visible = $true; $clip.BringToFront() }
+        elseif ($clip.Parent -eq $content) { $content.Controls.Remove($clip) }
         if ($sel -and $Scroll) { $Scroll.Target = $t.Page; $Scroll.Invalidate() }
         $t.Label.ForeColor = if ($sel) { $G::TabSel } elseif ($t.Label.AccessibleDescription -eq 'new') { $(if ($Deco) { $G::TabLine } else { $G::Brand }) } else { $G::TabIdle }
     }
@@ -434,8 +487,9 @@ function New-Chip($parent, $text, $id, [bool]$onOff, [bool]$small = $false) {
     $cb.Small = $small
     $cb.Text = $(if ($Favorites -contains $id -and -not $onOff) { "★ $text" } else { $text })
     if ($DelMarked -and $DelMarked[$id]) { $cb.Marked = $true }
-    if ($small -and ($NewIds -contains $id)) { $cb.Badge = 'n' }
+    if ($small -and -not $Portable -and ($NewIds -contains $id)) { $cb.Badge = 'n' }
     $cb.OnOff = $onOff
+    $cb.NoPic = -not (Test-Path -LiteralPath (Join-Path $ModPicDir "$id.png"))   # väike joon: pilti pole veel
     $cb.Margin = New-Object Windows.Forms.Padding(0, 0, 6, 6)
     $cb.FitWidth(270)
     $cb.Tag = $id
@@ -466,7 +520,8 @@ $CatOrder = @('Skins', 'Map', 'Visuals', 'Sounds & music', 'Utility (recommended
 function New-Card($flow, $row, $headerRef, [bool]$placing) {
     $m = $ById[$row[0]]
     $hero = Get-HeroName $m
-    $img = Get-HeroImage $hero
+    $heroImg = Get-HeroImage $hero
+    $img = Get-CardPicture $row $heroImg
     $multi = $row.Count -gt 1
     $I = [DlUi.Card]::Inset
 
@@ -482,8 +537,10 @@ function New-Card($flow, $row, $headerRef, [bool]$placing) {
     $t.AutoSize = $true; $t.Font = $FontTitle; $t.UseMnemonic = $false; $t.BackColor = 'Transparent'
     $t.MaximumSize = New-Object Drawing.Size(($CardW - $x - 12), 0)
     $t.Location = New-Object Drawing.Point(($I + $x - 3), ($I + 11))
-    $t.Text = if ($img -or $multi) { $(if ($hero) { $hero } else { $m.Hero }) } else { $m.Name }
-    if ($Deco -and ($img -or $multi)) { $t.Text = $t.Text.ToUpper() }
+    # kangelase kaart (pilt või mitu modi): pealkiri = kangelane; kangelaseta modi pildiga kaardil = modi nimi
+    $useHero = $multi -or ($img -and $m.Hero)
+    $t.Text = if ($useHero) { $(if ($hero) { $hero } else { $m.Hero }) } else { $m.Name }
+    if ($Deco -and $useHero) { $t.Text = $t.Text.ToUpper() }
     $card.Controls.Add($t)
 
     $chips = New-Object DlUi.CardFlow
@@ -495,13 +552,13 @@ function New-Card($flow, $row, $headerRef, [bool]$placing) {
     $made = @()
     foreach ($id in $row) {
         $mm = $ById[$id]; $names += $mm.Name
-        if ($img -or $multi) { $made += New-Chip $chips (Get-ShortName $mm) $id $false }
+        if ($useHero -or $multi) { $made += New-Chip $chips (Get-ShortName $mm) $id $false }
         else { $made += New-Chip $chips '' $id $true }
         # Selle modi altid: väike "+ alt" nupp kõrval, või ainult "n" modi nupu nurgas (AltStyle = 'badge')
         $mainChip = $made[-1]
         foreach ($c in (Get-Children $id)) {
             $names += $c.Name
-            if ($c.AltStyle -eq 'badge' -and -not $mainChip.AltBadge) {
+            if ($c.AltStyle -eq 'badge' -and -not $Portable -and -not $mainChip.AltBadge) {   # jagatavas ainult "+ …" nupud
                 $mainChip.AltBadge = 'n'; $mainChip.AltOn = [bool]$State[$c.Id]
                 $mainChip.AccessibleDescription = $c.Id    # millist alti "n" lülitab
                 $mainChip.Add_AltClicked({
@@ -561,7 +618,16 @@ function New-Card($flow, $row, $headerRef, [bool]$placing) {
         if ($ModMenu) { $card.ContextMenuStrip = $ModMenu; $t.ContextMenuStrip = $ModMenu }
     }
     $flow.Controls.Add($card)
-    $script:Cards += @{ Card = $card; Title = $t; Row = $row; Text = ($names -join ' ').ToLower(); Header = $headerRef }
+    $script:Cards += @{ Card = $card; Title = $t; Row = $row; Text = ($names -join ' ').ToLower(); Header = $headerRef; HeroImg = $heroImg }
+    # paremklõps kaardi pildil: pildi muutmine (pildid.ps1)
+    $card.Add_MouseUp({
+        if ($_.Button -ne 'Right' -or $this.PicRect.IsEmpty -or -not $this.PicRect.Contains($_.Location)) { return }
+        $me = $this; $c = @($Cards | Where-Object { $_.Card -eq $me })[0]; if (-not $c) { return }
+        $script:PicClickAt = [DateTime]::Now
+        $id = Get-CardShownMod $c.Row; if (-not $id) { $id = $c.Row[0] }
+        $script:PicReq = @{ Id = $id; Row = @($c.Row) }   # (BeginInvoke käivitub hiljem: muutujad skripti tasemel)
+        if (Get-Command Show-PictureFor -ErrorAction SilentlyContinue) { $form.BeginInvoke([Action]{ Show-PictureFor $script:PicReq.Id $script:PicReq.Row }) | Out-Null }
+    })
 }
 
 function Add-Tab($title, $ids, [bool]$withHeaders, [bool]$placing = $false, $hintText = $null) {
@@ -752,7 +818,7 @@ function Build-Tabs {
         $TabBtns[-1].Label.ContextMenuStrip = $TabMenu
         $bulk = New-Pill '+  Add mods' $true; $bulk.Font = $FontChip; $bulk.FitWidth(14, 34)
         $bulk.Margin = New-Object Windows.Forms.Padding(0, 0, 12, 0); $bulk.Tag = $name
-        $bulk.Add_Click({ Show-BulkAdd $this.Tag })
+        $bulk.Add_Click({ Set-SelectMode 'tab' $this.Tag })   # klõpsa modidel, siis "Save tab"
         $topRow = $TabBtns[-1].Page.Controls[0]; $topRow.Controls.Add($bulk); $topRow.Controls.SetChildIndex($bulk, 0)
     }
     Add-PlusTab
@@ -807,7 +873,9 @@ function Place-Right {
     if ($themeBtn) { $themeBtn.Location = New-Object Drawing.Point(($header.ClientSize.Width - $themeBtn.Width - 24), 8) }   # päise paremas ülanurgas
     # alumine teade ei tohi nuppude alla minna: murrab vajadusel kahele reale
     if ($delAllBtn -and $delAllBtn.Visible) { $delAllBtn.Location = New-Object Drawing.Point(($save.Left - $delAllBtn.Width - 12), 16) }
-    $right = if ($delAllBtn -and $delAllBtn.Visible) { $delAllBtn.Left } else { $save.Left }
+    if ($selAllBtn -and $selAllBtn.Visible) { $selAllBtn.Location = New-Object Drawing.Point(($delAllBtn.Left - $selAllBtn.Width - 8), 16) }
+    $right = if ($selAllBtn -and $selAllBtn.Visible) { $selAllBtn.Left } elseif ($delAllBtn -and $delAllBtn.Visible) { $delAllBtn.Left } else { $save.Left }
+    if ($likeBtn -and $likeBtn.Visible) { $likeBtn.Location = New-Object Drawing.Point(($right - $likeBtn.Width - 10), 16); $right = $likeBtn.Left }   # laigid (meeldimised.ps1)
     $note.MaximumSize = New-Object Drawing.Size([Math]::Max(150, $right - 44), 0)
     $note.Top = [Math]::Max(4, [int](($bottom.ClientSize.Height - $note.Height) / 2))
     # Päise nupud paremalt vasakule: otsing, Add, Delete, Check, Updates. Nupud ei tohi minna logo alla:
@@ -838,6 +906,9 @@ $form.Add_KeyDown({
 . (Join-Path $PSScriptRoot 'kontroll.ps1')
 . (Join-Path $PSScriptRoot 'osad.ps1')
 . (Join-Path $PSScriptRoot 'uuendused.ps1')
+. (Join-Path $PSScriptRoot 'pildid.ps1')
+# laikide meeldetuletus: ainult sinu versioonis (jagatavas seda faili pole)
+$lk = Join-Path $PSScriptRoot 'meeldimised.ps1'; if (Test-Path -LiteralPath $lk) { . $lk }
 Build-Tabs
 
 function Update-Status {
@@ -867,18 +938,39 @@ $fixBtn.Add_Click({
     Update-Status
 })
 
-$save.Add_Click({
-    if (-not (Test-GameClosed)) { return }
+# Salvestamata muudatuste arv (üks kangelase kohta, nagu alumisel ribal)
+function Get-PendingCount {
+    $changed = @{}
+    foreach ($m in $Mods) { if ([bool]$State[$m.Id] -ne [bool](Test-On $m)) { $grp = if ($m.Parent -and $ById[$m.Parent]) { $ById[$m.Parent] } else { $m }; $changed[$(if ($grp.Hero) { "h:$($grp.Hero)" } else { $grp.Id })] = 1 } }
+    return $changed.Count
+}
+# Sulgemisel salvestamata muudatused: Yes = salvesta ja sulge, No = sulge ilma, Cancel = jää
+$form.Add_FormClosing({
+    if ($script:ClosingChecked -or $env:DLTEST) { return }
+    $n = Get-PendingCount
+    if (-not $n) { return }
+    $r = [Windows.Forms.MessageBox]::Show($form, "You have $n unsaved change$(if ($n -gt 1) { 's' }).`n`nSave them before closing?`n`nYes = save and close    No = close without saving    Cancel = keep the app open", 'Deadlock Mods', 'YesNoCancel', 'Question', 'Button1')
+    if ($r -eq 'Cancel') { $_.Cancel = $true; return }
+    # Yes: salvesta kohe siin; õnnestus -> aken sulgub (sulgemist ei katkestata), ebaõnnestus -> jääb lahti
+    if ($r -eq 'Yes') { if (-not (Save-Changes)) { $_.Cancel = $true; return } }
+    $script:ClosingChecked = $true
+})
+
+# Salvestab modid mängu. Tagastab $true, kui õnnestus.
+function Save-Changes {
+    if (-not (Test-GameClosed)) { return $false }
     try {
         # Enne välja, siis sisse, et sama kangelase kaks skinni korraga sees poleks.
         foreach ($m in $Mods) { if (-not $State[$m.Id]) { Set-Files $m.Files $false } }
         foreach ($m in $Mods) { if ($State[$m.Id]) { Set-Files $m.Files $true } }
-        # Õnnestus: aken lihtsalt sulgub (teadet ei näidata)
-        $form.Close()
+        return $true
     } catch {
         [Windows.Forms.MessageBox]::Show($form, "Saving failed:`n`n$($_.Exception.Message)`n`nIf a file is locked, close Deadlock and try again.", 'Deadlock Mods', 'OK', 'Error') | Out-Null
+        return $false
     }
-})
+}
+# Õnnestus: aken lihtsalt sulgub (teadet ei näidata)
+$save.Add_Click({ if (Save-Changes) { $script:ClosingChecked = $true; $form.Close() } })
 
 Update-Status
 if ($env:DLTOGGLE_SHOT) {

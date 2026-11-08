@@ -8,10 +8,173 @@
 $CheckOriginals = Join-Path $ArchiveDir 'check_originals'
 $OrphanDir = Join-Path $ArchiveDir 'orphans'
 
+# Minimeerimine pikkadel akendel (Check, Updates, Mass add): modaalne aken üksi minimeerituna jätaks põhiakna lukku,
+# seepärast minimeeritakse kogu rakendus; tagasi avades tuleb aken samas seisus tagasi.
+# Dialoogi päis: tume riba nagu põhiaknal, suur pealkiri + väike alltekst. Tagastab @{ Panel; Title; Sub }
+function New-DialogHeader($dlg, $title, $subtitle) {
+    $p = New-Object Windows.Forms.Panel; $p.Dock = 'Top'; $p.Height = 62
+    if ($DarkBar) { $p.Add_Paint({ & $DarkBar $_.Graphics $this.ClientRectangle $true }) } else { $p.BackColor = [DlUi.G]::Bg }
+    $t = New-Object Windows.Forms.Label; $t.AutoSize = $true; $t.BackColor = 'Transparent'; $t.ForeColor = [DlUi.G]::HeadBright
+    $t.Font = New-Object Drawing.Font('Bahnschrift SemiBold', 15); $t.Text = $title; $t.Location = New-Object Drawing.Point(16, 7)
+    $s = New-Object Windows.Forms.Label; $s.AutoSize = $true; $s.BackColor = 'Transparent'; $s.ForeColor = [DlUi.G]::HeadMuted
+    $s.Text = $subtitle; $s.Location = New-Object Drawing.Point(18, 37); $s.UseMnemonic = $false
+    $p.Controls.AddRange(@($t, $s)); $dlg.Controls.Add($p)
+    return @{ Panel = $p; Title = $t; Sub = $s }
+}
+
+function Enable-DialogMinimize($dlg) {
+    $dlg.MinimizeBox = $true
+    $dlg.Add_Resize({ if ($this.WindowState -eq 'Minimized') { $this.WindowState = 'Normal'; $form.WindowState = 'Minimized' } })
+}
 $chkBtn = New-Pill '✓  Check' $false
 $chkBtn.Font = $FontChip; $chkBtn.Dark = $Deco; $chkBtn.FitWidth(16, 36)
 $header.Controls.Add($chkBtn)
-$chkBtn.Add_Click({ Show-ModCheck })
+$chkBtn.Add_Click({ if ($SelMode -eq 'check') { Set-SelectMode $null } elseif (Show-Intro 'check') { Set-SelectMode 'check' } })   # valikurežiim (kustutamine.ps1)
+
+# Check'i algus: selgitus + mida kontrollida (kõik või valitud kangelased/modid, mitu korraga).
+# Tagastab 'all', valitud id-de massiivi (koos altidega) või $null (Cancel).
+function Show-CheckPicker {
+    if ($env:DLTEST -and -not $env:DLTEST_INTRO) { return 'all' }
+    $d = New-Object Windows.Forms.Form
+    $d.Text = 'Check mods'; $d.BackColor = $DlgBg; $d.ForeColor = $DlgText; $d.Font = $FontUi
+    $d.FormBorderStyle = 'Sizable'; $d.MinimizeBox = $false; $d.StartPosition = 'CenterParent'
+    $d.ClientSize = New-Object Drawing.Size(640, 690); $d.MinimumSize = New-Object Drawing.Size(520, 520)
+    $d.Add_HandleCreated({ $v = 1; [void][DlToggle.Native]::DwmSetWindowAttribute($this.Handle, 20, [ref]$v, 4) })
+    $info = New-Object Windows.Forms.Label
+    $info.AutoSize = $false; $info.Location = New-Object Drawing.Point(16, 12); $info.Size = New-Object Drawing.Size(608, 196); $info.Anchor = 'Top, Left, Right'
+    $info.ForeColor = $DlgText; $info.UseMnemonic = $false
+    $info.Text = $IntroText['check'].Text
+    $rAll = New-Object Windows.Forms.RadioButton; $rAll.Text = 'All mods'; $rAll.AutoSize = $true; $rAll.Checked = $true; $rAll.ForeColor = $DlgText
+    $rAll.Location = New-Object Drawing.Point(16, 216)
+    $rSome = New-Object Windows.Forms.RadioButton; $rSome.Text = 'Only these heroes / mods (tick as many as you want):'; $rSome.AutoSize = $true; $rSome.ForeColor = $DlgText
+    $rSome.Location = New-Object Drawing.Point(16, 242)
+    $q = New-Object Windows.Forms.TextBox
+    $q.Location = New-Object Drawing.Point(16, 270); $q.Width = 608; $q.Anchor = 'Top, Left, Right'
+    $q.BackColor = $G::Panel; $q.ForeColor = $G::Bright; $q.BorderStyle = 'FixedSingle'
+    $q.Add_HandleCreated({ [void][DlToggle.Native]::SendMessage($this.Handle, 0x1501, [IntPtr]1, 'Search hero or mod…') })
+    $list = New-Object Windows.Forms.CheckedListBox
+    $list.Location = New-Object Drawing.Point(16, 300); $list.Size = New-Object Drawing.Size(608, 334); $list.Anchor = 'Top, Bottom, Left, Right'
+    $list.CheckOnClick = $true; $list.IntegralHeight = $false; $list.BorderStyle = 'FixedSingle'
+    $list.BackColor = $G::Panel; $list.ForeColor = $G::Text; $list.Font = $FontChip
+    # read: kangelane (märgib kõik tema modid) ja tema modid; lõpus kangelaseta modid
+    $rows = New-Object Collections.ArrayList
+    $main = @($Mods | Where-Object { -not $_.Parent })
+    $byHero = [ordered]@{}
+    foreach ($m in ($main | Sort-Object @{ e = { "$(Get-HeroName $_)" } }, @{ e = { $_.Name } })) { $h = Get-HeroName $m; $k = if ($m.Hero -and $h) { $h } else { '' }; if (-not $byHero.Contains($k)) { $byHero[$k] = @() }; $byHero[$k] += $m }
+    foreach ($k in @($byHero.Keys | Where-Object { $_ }) + @($byHero.Keys | Where-Object { -not $_ })) {
+        $ids = @($byHero[$k] | ForEach-Object { $_.Id })
+        if ($k) { [void]$rows.Add(@{ Text = "$($k.ToUpper())   (all $($ids.Count))"; Ids = $ids; Hero = $true }) }
+        else { [void]$rows.Add(@{ Text = 'OTHER MODS (no hero)   (all)'; Ids = $ids; Hero = $true }) }
+        foreach ($m in $byHero[$k]) { [void]$rows.Add(@{ Text = "      $(Get-ShortName $m)"; Ids = @($m.Id); Hero = $false; Find = "$k $($m.Name)".ToLower() }) }
+    }
+    $sel = @{}
+    $st = @{ Shown = @(); Filling = $false }
+    $fill = {
+        $st.Filling = $true; $list.BeginUpdate(); $list.Items.Clear(); $st.Shown = @()
+        $f = $q.Text.Trim().ToLower()
+        foreach ($r in $rows) {
+            if ($f -and -not ($r.Text.ToLower().Contains($f) -or ($r.Find -and $r.Find.Contains($f)))) { continue }
+            $i = $list.Items.Add($r.Text); $st.Shown += , $r
+            $on = @($r.Ids | Where-Object { $sel[$_] }).Count -eq $r.Ids.Count
+            if ($on) { $list.SetItemChecked($i, $true) }
+        }
+        $list.EndUpdate(); $st.Filling = $false
+    }
+    $count = New-Object Windows.Forms.Label; $count.AutoSize = $true; $count.ForeColor = $DlgText; $count.Anchor = 'Bottom, Left'
+    $count.Location = New-Object Drawing.Point(16, 650); $count.Text = 'All mods will be checked.'
+    $ok = New-Pill 'Start check' $true; $ok.FitWidth(22, 34); $ok.Anchor = 'Bottom, Right'; $ok.Location = New-Object Drawing.Point((624 - $ok.Width), 642)
+    $no = New-Pill 'Cancel' $false; $no.FitWidth(16, 34); $no.Anchor = 'Bottom, Right'; $no.Location = New-Object Drawing.Point(($ok.Left - $no.Width - 10), 642)
+    $upd = {
+        $n = @($sel.Keys | Where-Object { $sel[$_] }).Count
+        $count.Text = if ($rAll.Checked) { "All $($main.Count) mods will be checked." } else { "$n mod(s) selected." }
+        $ok.Enabled = ($rAll.Checked -or $n -gt 0)
+    }
+    $list.Add_ItemCheck({
+        if ($st.Filling) { return }
+        $r = $st.Shown[$_.Index]; $v = ($_.NewValue -eq 'Checked')
+        foreach ($id in $r.Ids) { $sel[$id] = $v }
+        $rSome.Checked = $true
+        # kangelase rida muudab ka tema modide linnukesi: täida uuesti pärast seda klõpsu
+        $d.BeginInvoke([Action]{ & $fill; & $upd }) | Out-Null
+    })
+    $q.Add_TextChanged({ & $fill })
+    $rAll.Add_CheckedChanged({ & $upd }); $rSome.Add_CheckedChanged({ & $upd })
+    $ok.Add_Click({ $d.DialogResult = 'OK'; $d.Close() }); $no.Add_Click({ $d.DialogResult = 'Cancel'; $d.Close() })
+    $d.Controls.AddRange(@($info, $rAll, $rSome, $q, $list, $count, $ok, $no))
+    & $fill; & $upd
+    $res = $d.ShowDialog($form); $d.Dispose()
+    if ($res -ne 'OK') { return $null }
+    if ($rAll.Checked) { return 'all' }
+    $ids = @($sel.Keys | Where-Object { $sel[$_] })
+    $ids += @($Mods | Where-Object { $_.Parent -and $ids -contains $_.Parent } | ForEach-Object { $_.Id })   # altid ja lisad ka
+    return , $ids
+}
+
+# Enne "Check" / "Updates" käivitamist: lühike seletus, mida see teeb (linnuke "ära näita enam" -> teated.json)
+$IntroFile = Join-Path $PSScriptRoot 'teated.json'
+$IntroText = @{
+    check = @{ Title = 'Check mods'; Text = @"
+Check looks through all your mods and lists problems. It takes a few minutes.
+
+It looks for:
+  •  mod files that are missing, or are in both folders at once
+  •  two mods using the same file number (only one of them can work)
+  •  unknown files in the game's addons folder
+  •  old shared files inside mods that can break other heroes' abilities or sounds
+  •  old cameras (skins made before the October 2026 game update sit too low/high)
+
+Nothing is changed while it checks. Only the problems you tick are fixed when you press "Fix checked".
+Originals are kept in: $ArchiveDir
+"@ }
+    updates = @{ Title = 'Check for updates'; Text = @"
+Updates looks up every mod that has a GameBanana link (internet needed).
+Nothing is downloaded or changed yet - you only get a list:
+
+  •  Updates: a newer version is on GameBanana
+  •  Maybe updates: probably newer, but the app is not sure (you decide)
+  •  Optional extras: other versions or add-ons on the same page
+  •  Problems: the page or your file was removed
+
+When you tick mods and press "Update checked", for each one:
+  1. the new version is downloaded and checked like a new mod (camera, old shared files)
+  2. it replaces the old version in the same place - name, tab and on/off stay the same
+  3. the old version and its old archive are deleted
+Deadlock must be closed for mods that are on.
+"@ }
+}
+function Show-Intro($key) {
+    if ($env:DLTEST -and -not $env:DLTEST_INTRO) { return $true }
+    $seen = @{}
+    if (Test-Path -LiteralPath $IntroFile) { try { foreach ($p in ([IO.File]::ReadAllText($IntroFile) | ConvertFrom-Json).PSObject.Properties) { $seen[$p.Name] = $p.Value } } catch {} }
+    if ($seen[$key]) { return $true }
+    $info = $IntroText[$key]
+    $d = New-Object Windows.Forms.Form
+    $d.Text = $info.Title; $d.BackColor = $DlgBg; $d.ForeColor = $DlgText; $d.Font = $FontUi
+    $d.FormBorderStyle = 'FixedDialog'; $d.MaximizeBox = $false; $d.MinimizeBox = $false; $d.StartPosition = 'CenterParent'
+    $d.Add_HandleCreated({ $v = 1; [void][DlToggle.Native]::DwmSetWindowAttribute($this.Handle, 20, [ref]$v, 4) })
+    $l = New-Object Windows.Forms.Label
+    $l.AutoSize = $true; $l.MaximumSize = New-Object Drawing.Size(600, 0); $l.UseMnemonic = $false
+    $l.Location = New-Object Drawing.Point(20, 18); $l.ForeColor = $DlgText; $l.Text = $info.Text
+    $d.Controls.Add($l)
+    $h = $l.GetPreferredSize((New-Object Drawing.Size(600, 0))).Height
+    $cb = New-Object Windows.Forms.CheckBox
+    $cb.Text = "Don't show this again"; $cb.AutoSize = $true; $cb.ForeColor = $DlgText
+    $cb.Location = New-Object Drawing.Point(20, (32 + $h))
+    $ok = New-Pill 'Start' $true; $ok.FitWidth(26, 34)
+    $no = New-Pill 'Cancel' $false; $no.FitWidth(16, 34)
+    $d.ClientSize = New-Object Drawing.Size(640, (86 + $h))
+    $ok.Location = New-Object Drawing.Point((620 - $ok.Width), (26 + $h)); $no.Location = New-Object Drawing.Point(($ok.Left - $no.Width - 10), (26 + $h))
+    $ok.Add_Click({ $d.DialogResult = 'OK'; $d.Close() }); $no.Add_Click({ $d.DialogResult = 'Cancel'; $d.Close() })
+    $d.Controls.AddRange(@($cb, $ok, $no))
+    $res = $d.ShowDialog($form)
+    if ($res -eq 'OK' -and $cb.Checked) {
+        $seen[$key] = $true
+        $o = [ordered]@{}; foreach ($k in $seen.Keys) { $o[$k] = $seen[$k] }
+        [IO.File]::WriteAllText($IntroFile, (ConvertTo-Json $o), (New-Object Text.UTF8Encoding $false))
+    }
+    $d.Dispose()
+    return ($res -eq 'OK')
+}
 
 # Modi faili praegune asukoht (sees -> addons\pakNN_dir.vpk, väljas -> addons_off\nimi.vpk)
 function Get-ModFilePath($f) {
@@ -133,7 +296,7 @@ function Invoke-CheckFix($x) {
         }
         'pakdup' {
             $m = $x.Data
-            $free = @(Get-FreePaks $m.Files.Count)
+            $free = Get-FreePaks $m.Files.Count   # (funktsioon tagastab juba massiivi; @() tegi massiivi massiivis)
             $nums = @()
             for ($i = 0; $i -lt $m.Files.Count; $i++) {
                 $n = $free[$i]
@@ -175,48 +338,54 @@ function Invoke-CheckFix($x) {
     }
 }
 
-function Show-ModCheck {
+function Show-ModCheck($pick = 'all') {
     if ($script:AddBusy) { return }
     $script:AddBusy = $true; $chkBtn.Enabled = $false
     $st = @{ Queue = (New-Object Collections.ArrayList); Busy = $false; Closing = $false; Total = 0; Done = 0; Found = (New-Object Collections.ArrayList); Changed = $false }
 
     $d = New-Object Windows.Forms.Form
     $d.Text = 'Check mods'; $d.BackColor = $DlgBg; $d.ForeColor = $DlgText; $d.Font = $FontUi
-    $d.FormBorderStyle = 'Sizable'; $d.MinimizeBox = $false; $d.StartPosition = 'CenterParent'
-    $d.ClientSize = New-Object Drawing.Size(940, 580); $d.MinimumSize = New-Object Drawing.Size(700, 400)
+    $d.FormBorderStyle = 'Sizable'; $d.StartPosition = 'CenterParent'; Enable-DialogMinimize $d
+    $d.ClientSize = New-Object Drawing.Size(940, 660); $d.MinimumSize = New-Object Drawing.Size(700, 460)
     $d.Add_HandleCreated({ $v = 1; [void][DlToggle.Native]::DwmSetWindowAttribute($this.Handle, 20, [ref]$v, 4) })
-    $lab = New-Object Windows.Forms.Label
-    $lab.AutoSize = $false; $lab.Size = New-Object Drawing.Size(908, 22); $lab.Anchor = 'Top, Left, Right'
-    $lab.ForeColor = $DlgText; $lab.Font = $FontChip; $lab.Location = New-Object Drawing.Point(16, 12)
-    $lab.Text = 'Checking files…'
-    $bar = New-Object Windows.Forms.ProgressBar
-    $bar.Location = New-Object Drawing.Point(16, 38); $bar.Size = New-Object Drawing.Size(908, 8); $bar.Anchor = 'Top, Left, Right'
+    $sel = if ($pick -is [array]) { @($pick) } else { $null }    # $null = kõik modid
+    $nMods = if ($sel) { @($Mods | Where-Object { -not $_.Parent -and $sel -contains $_.Id }).Count } else { @($Mods | Where-Object { -not $_.Parent }).Count }
+    $hdr = New-DialogHeader $d 'Check mods' $(if ($sel) { "Checking $nMods selected mod(s)" } else { "Checking all $nMods mods" })
+    # $lab = suur teatekast (töötab -> valmis), $bar = edenemine, $sub = mida parajasti vaatab
+    $lab = New-Object DlUi.Banner
+    $lab.Location = New-Object Drawing.Point(16, 74); $lab.Size = New-Object Drawing.Size(908, 46); $lab.Anchor = 'Top, Left, Right'
+    $lab.Font = $FontChip; $lab.Text = 'Checking files…'; $lab.Kind = 0
+    $bar = New-Object DlUi.Bar
+    $bar.Location = New-Object Drawing.Point(16, 130); $bar.Size = New-Object Drawing.Size(908, 8); $bar.Anchor = 'Top, Left, Right'
     $sub = New-Object Windows.Forms.Label
-    $sub.AutoSize = $false; $sub.Size = New-Object Drawing.Size(908, 20); $sub.Anchor = 'Top, Left, Right'
-    $sub.ForeColor = $DlgMuted; $sub.Location = New-Object Drawing.Point(16, 50); $sub.AutoEllipsis = $true
+    $sub.AutoSize = $false; $sub.Size = New-Object Drawing.Size(908, 20); $sub.Anchor = 'Top, Left, Right'; $sub.UseMnemonic = $false
+    $sub.ForeColor = $DlgMuted; $sub.Location = New-Object Drawing.Point(16, 144); $sub.AutoEllipsis = $true
     $lv = New-Object Windows.Forms.ListView
     $lv.View = 'Details'; $lv.FullRowSelect = $true; $lv.CheckBoxes = $true; $lv.ShowItemToolTips = $true
-    $lv.Location = New-Object Drawing.Point(16, 76); $lv.Size = New-Object Drawing.Size(908, 440); $lv.Anchor = 'Top, Bottom, Left, Right'
+    $lv.Location = New-Object Drawing.Point(16, 170); $lv.Size = New-Object Drawing.Size(908, 426); $lv.Anchor = 'Top, Bottom, Left, Right'
     $lv.BackColor = $G::Panel; $lv.ForeColor = $G::Text; $lv.BorderStyle = 'FixedSingle'; $lv.Font = $FontChip
-    foreach ($c in @(@('', 70), @('Mod', 230), @('Problem', 400), @('Fix', 190))) { [void]$lv.Columns.Add($c[0], $c[1]) }
+    foreach ($c in @(@('', 84), @('Mod', 220), @('Problem', 390), @('How it is fixed', 200))) { [void]$lv.Columns.Add($c[0], $c[1]) }
+    [DlUi.ListStyle]::Apply($lv, 28)
+    $fitCols = { $w = $lv.ClientSize.Width - $lv.Columns[0].Width - $lv.Columns[1].Width - $lv.Columns[2].Width - 4; if ($w -gt 150) { $lv.Columns[3].Width = $w } }
+    $lv.Add_Resize($fitCols); $d.Add_Shown($fitCols)
     $deep = New-Object Windows.Forms.CheckBox
     $deep.Text = 'Also check cameras and shared files (slower)'; $deep.Checked = $true; $deep.AutoSize = $true
-    $deep.ForeColor = $DlgText; $deep.Location = New-Object Drawing.Point(16, 538); $deep.Anchor = 'Bottom, Left'
+    $deep.ForeColor = $DlgText; $deep.Location = New-Object Drawing.Point(16, 618); $deep.Anchor = 'Bottom, Left'
     $fix = New-Pill 'Fix checked' $true; $fix.FitWidth(22, 36); $fix.Anchor = 'Bottom, Right'; $fix.Enabled = $false
     $close = New-Pill 'Close' $false; $close.FitWidth(18, 36); $close.Anchor = 'Bottom, Right'
-    $close.Location = New-Object Drawing.Point((924 - $close.Width), 530)
-    $fix.Location = New-Object Drawing.Point(($close.Left - $fix.Width - 10), 530)
+    $close.Location = New-Object Drawing.Point((924 - $close.Width), 610)
+    $fix.Location = New-Object Drawing.Point(($close.Left - $fix.Width - 10), 610)
     $close.Add_Click({ $d.Close() })
 
     $addRow = {
         param($x)
         $lvl = $x.Level
-        $row = New-Object Windows.Forms.ListViewItem($(switch ($lvl) { 'Error' { '✕ Error' } 'Warning' { '! Warn' } default { 'i Info' } }))
+        $row = New-Object Windows.Forms.ListViewItem($(switch ($lvl) { 'Error' { '✕ Problem' } 'Warning' { '! Warning' } default { 'i Note' } }))
         [void]$row.SubItems.Add($(if ($x.Mod) { $x.Mod.Name } else { '—' }))
         [void]$row.SubItems.Add($x.Text)
         [void]$row.SubItems.Add($(if ($x.Fix) { $x.FixText } else { "(manual) $($x.FixText)" }))
         $row.ToolTipText = "$($x.Text)`n`nFix: $($x.FixText)"
-        $row.ForeColor = switch ($lvl) { 'Error' { [DlUi.G]::Hex('#B03A2E') } 'Warning' { [DlUi.G]::Hex('#9A6A12') } default { [DlUi.G]::Muted } }
+        $row.ForeColor = switch ($lvl) { 'Error' { [DlUi.G]::Hex('#8E2A20') } 'Warning' { [DlUi.G]::Hex('#6E4A08') } default { [DlUi.G]::Text } }
         $row.Tag = $x
         if ($x.Fix -and $lvl -eq 'Error' -and -not $x.NoAuto) { $row.Checked = $true }   # hoiatused valib kasutaja ise
         [void]$lv.Items.Add($row)
@@ -231,7 +400,13 @@ function Show-ModCheck {
         $bar.Value = $bar.Maximum
         $errs = @($st.Found | Where-Object { $_.Level -eq 'Error' }).Count
         $warn = @($st.Found | Where-Object { $_.Level -eq 'Warning' }).Count
-        $lab.Text = if (-not $st.Found.Count) { "✓  All $($Mods.Count) mods look fine." } else { "Done: $errs error(s), $warn warning(s). Tick what to fix and press 'Fix checked'." }
+        $info = @($st.Found | Where-Object { $_.Level -ne 'Error' -and $_.Level -ne 'Warning' }).Count
+        if (-not $st.Found.Count) { $lab.Kind = 1; $lab.Text = "Done - all $nMods mods look fine. Nothing to fix." }
+        elseif ($errs) { $lab.Kind = 3; $lab.Text = "Done - found $errs problem(s)" + $(if ($warn) { " and $warn warning(s)" } else { '' }) + ". The ticked ones are fixed when you press 'Fix checked'." }
+        elseif ($warn) { $lab.Kind = 2; $lab.Text = "Done - $warn warning(s), no real problems. Read them and tick the ones you want to fix." }
+        else { $lab.Kind = 1; $lab.Text = "Done - no problems. $info note(s) about unused files (harmless)." }
+        $hdr.Sub.Text = "Finished: $nMods mod(s) checked"
+        [DlUi.Notify]::Done($form, [bool]($errs -or $warn))
         $sub.Text = if ($deep.Checked) { 'Checked: files, pak numbers, unknown files, alts, shared files, cameras.' } else { 'Checked: files, pak numbers, unknown files, alts (cameras/shared files skipped).' }
         & $updateFix
     }
@@ -250,7 +425,7 @@ function Show-ModCheck {
         try { foreach ($x in (Get-DeepFindings $job.Mod $job.File)) { if (-not $st.Closing) { & $addRow $x } } }
         catch { if (-not $st.Closing) { & $addRow @{ Level = 'Warning'; Mod = $job.Mod; Text = "Could not read $($job.File.Off): $($_.Exception.Message)"; Fix = $null; FixText = 'Re-add the mod' } } }
         $st.Done++
-        if (-not $st.Closing) { $bar.Value = [Math]::Min($bar.Maximum, $st.Done); $lab.Text = "Checking mods… $($st.Done) / $($st.Total)" }
+        if (-not $st.Closing) { $bar.Value = [Math]::Min($bar.Maximum, $st.Done); $lab.Text = "Checking mods… $($st.Done) / $($st.Total)   (you can minimize this window - it tells you when it is done)" }
         $st.Busy = $false
     })
 
@@ -281,9 +456,9 @@ function Show-ModCheck {
 
     $d.Add_Shown({
         $d.Refresh()
-        foreach ($x in (Get-QuickFindings)) { & $addRow $x }
+        foreach ($x in (Get-QuickFindings)) { if (-not $sel -or ($x.Mod -and $sel -contains $x.Mod.Id)) { & $addRow $x } }   # valikuga: ainult nende modide leiud
         # põhjalik: iga modi iga fail eraldi
-        foreach ($m in $Mods) { foreach ($f in $m.Files) { [void]$st.Queue.Add(@{ Mod = $m; File = $f }) } }
+        foreach ($m in $Mods) { if ($sel -and $sel -notcontains $m.Id) { continue }; foreach ($f in $m.Files) { [void]$st.Queue.Add(@{ Mod = $m; File = $f }) } }
         $st.Total = $st.Queue.Count; $bar.Maximum = [Math]::Max(1, $st.Total)
         $lab.Text = "Checking mods… 0 / $($st.Total)"
         $timer.Start()

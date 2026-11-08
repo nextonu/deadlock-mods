@@ -20,15 +20,38 @@ $delAllBtn = New-Pill '✕  Delete selected (0)' $false
 $delAllBtn.Danger = $true; $delAllBtn.Font = $FontChip; $delAllBtn.FitWidth(14, 32); $delAllBtn.Visible = $false
 $bottom.Controls.Add($delAllBtn)
 
+# Teine nupp alumisel ribal (ainult Check / Updates režiimis): "kõik"
+$selAllBtn = New-Pill 'All' $false
+$selAllBtn.Font = $FontChip; $selAllBtn.Dark = $Deco; $selAllBtn.FitWidth(14, 32); $selAllBtn.Visible = $false
+$bottom.Controls.Add($selAllBtn)
+
+# Valikurežiim: modide nuppudele vajutades need MÄRGITAKSE (režiimi värviga), alumise riba nupp teeb tegevuse.
+#  delete  = kustuta märgitud (punane)          check   = kontrolli märgitud (sinine)
+#  updates = otsi märgitud modidele uuendusi    tab     = märgitud modid vahelehele (lilla; olemasolevad ette märgitud)
+$SelMode = $null; $SelTab = $null
+$SelModes = @{
+    delete  = @{ Color = '#B83224'; Sym = '✕'; Word = 'Delete'; Btn = '✕  Delete selected'; Header = '✓  Done'
+                 Note = "Delete mode: click mods to mark them, then press 'Delete selected'." }
+    check   = @{ Color = '#2F6FB0'; Sym = '✓'; Word = 'Check'; Btn = '✓  Check selected'; All = 'Check all mods'; Header = '✕  Cancel'
+                 Note = "Check: click the mods you want checked (a hero card = click each skin), then 'Check selected' - or 'Check all mods'." }
+    updates = @{ Color = '#2E7D32'; Sym = '⟳'; Word = 'Update'; Btn = '⟳  Look up selected'; All = 'All linked mods'; Header = '✕  Cancel'
+                 Note = "Updates: click the mods to look up on GameBanana, then 'Look up selected' - or 'All linked mods'." }
+    tab     = @{ Color = '#7A4FB5'; Sym = '+'; Word = 'Add'; Btn = '+  Save tab'; Header = $null
+                 Note = "Click mods to put them in this tab (click again to take one out), then 'Save tab'." }
+}
+function Get-ModeButton($mode) { switch ($mode) { 'delete' { $delBtn } 'check' { $chkBtn } 'updates' { $updBtn } default { $null } } }
+$ModeButtonText = @{}
+
 function Update-DeleteUi {
     $n = $DelMarked.Count
-    $delAllBtn.Text = "✕  Delete selected ($n)"; $delAllBtn.FitWidth(14, 32); $delAllBtn.Invalidate()
-    $delAllBtn.Enabled = ($n -gt 0)
-    foreach ($id in $Boxes.Keys) { foreach ($b in $Boxes[$id]) { $m = [bool]$DelMarked[$id]; if ($b.Marked -ne $m) { $b.Marked = $m; $b.Invalidate() } } }
-    if ($script:DeleteMode) {
-        $note.Text = if ($n) { "✕  $n marked. Click more mods, then press 'Delete selected'." } else { "✕  Delete mode: click mods to mark them, then press 'Delete selected'." }
-        $note.ForeColor = $G::Hex('#C0392B')
+    if ($SelMode) {
+        $md = $SelModes[$SelMode]
+        $delAllBtn.Text = "$($md.Btn) ($n)"; $delAllBtn.FitWidth(14, 32); $delAllBtn.Invalidate()
+        $delAllBtn.Enabled = ($n -gt 0 -or $SelMode -eq 'tab')
+        $note.Text = if ($SelMode -eq 'tab') { "+  Tab '$SelTab': $n mod(s). $($md.Note)" } elseif ($n) { "$($md.Sym)  $n marked. Click more, then press '$($md.Btn.Substring(3))'." } else { "$($md.Sym)  $($md.Note)" }
+        $note.ForeColor = [DlUi.G]::Mix($G::HeadText, $G::Hex($md.Color), 0.75)
     }
+    foreach ($id in $Boxes.Keys) { foreach ($b in $Boxes[$id]) { $m = [bool]$DelMarked[$id]; if ($b.Marked -ne $m) { $b.Marked = $m; $b.Invalidate() } } }
     Place-Right
 }
 
@@ -38,19 +61,59 @@ function Switch-DeleteMark($id) {
     Update-DeleteUi
 }
 
-function Set-DeleteMode([bool]$on) {
-    $script:DeleteMode = $on
-    [DlUi.Chip]::DeleteMode = $on
+# $mode = 'delete' | 'check' | 'updates' | 'tab' | $null (välja). $tab = vahelehe nimi (tab režiimis).
+function Set-SelectMode($mode, $tab = $null) {
+    $prev = $SelMode
+    if ($prev) { $b = Get-ModeButton $prev; if ($b) { $b.Text = $ModeButtonText[$prev]; $b.Danger = $false; $b.FitWidth(16, 36); $b.Invalidate() } }
+    $script:SelMode = $mode; $script:SelTab = $tab
+    $script:DeleteMode = [bool]$mode
+    [DlUi.Chip]::DeleteMode = [bool]$mode
     $DelMarked.Clear()
-    $delBtn.Danger = $on
-    $delBtn.Text = if ($on) { '✓  Done' } else { '✕  Delete' }
-    $delBtn.FitWidth(16, 36); $delBtn.Invalidate()
-    $delAllBtn.Visible = $on
+    if ($mode) {
+        $md = $SelModes[$mode]
+        [DlUi.Chip]::MarkColor = $G::Hex($md.Color); [DlUi.Chip]::MarkSymbol = $md.Sym; [DlUi.Chip]::MarkWord = $md.Word
+        $b = Get-ModeButton $mode
+        if ($b -and $md.Header) { $ModeButtonText[$mode] = $b.Text; $b.Text = $md.Header; $b.Danger = ($mode -eq 'delete'); $b.FitWidth(16, 36); $b.Invalidate() }
+        $delAllBtn.Danger = ($mode -eq 'delete')
+        $delAllBtn.Primary = ($mode -ne 'delete')
+        $selAllBtn.Visible = [bool]$md.All
+        if ($md.All) { $selAllBtn.Text = $md.All; $selAllBtn.FitWidth(14, 32) }
+        if ($mode -eq 'tab') {
+            foreach ($id in @($CustomTabs[$tab])) { $DelMarked[$id] = $true }   # olemasolevad ette märgitud
+            Show-TabByTitle 'All mods'                                          # kõik modid nähtaval
+        }
+    } else { $selAllBtn.Visible = $false }
+    $delAllBtn.Visible = [bool]$mode
     Update-DeleteUi
-    if (-not $on) { Update-Boxes }
+    if (-not $mode) { Update-Boxes }
 }
-$delBtn.Add_Click({ Set-DeleteMode (-not $script:DeleteMode) })
-$delAllBtn.Add_Click({ if ($DelMarked.Count) { Remove-Mods @($DelMarked.Keys) $false } })
+function Set-DeleteMode([bool]$on) { Set-SelectMode $(if ($on) { 'delete' } else { $null }) }
+
+# märgitud id-d koos nende altide/lisadega
+function Get-MarkedWithChildren { $ids = @($DelMarked.Keys); $ids += @($Mods | Where-Object { $_.Parent -and $ids -contains $_.Parent } | ForEach-Object { $_.Id }); return , @($ids | Select-Object -Unique) }
+
+$delBtn.Add_Click({ if ($SelMode -eq 'delete') { Set-SelectMode $null } else { Set-SelectMode 'delete' } })
+$delAllBtn.Add_Click({
+    switch ($SelMode) {
+        'delete'  { if ($DelMarked.Count) { Remove-Mods @($DelMarked.Keys) $false } }
+        'check'   { $ids = Get-MarkedWithChildren; Set-SelectMode $null; if ($ids.Count) { Show-ModCheck $ids } }
+        'updates' { $ids = Get-MarkedWithChildren; Set-SelectMode $null; if ($ids.Count) { Show-ModUpdates $ids } }
+        'tab'     {
+            $name = $SelTab; $marked = @($DelMarked.Keys)
+            # varasem järjekord jääb, uued lõppu
+            $keep = @($CustomTabs[$name] | Where-Object { $marked -contains $_ })
+            $CustomTabs[$name] = @($keep) + @($marked | Where-Object { $keep -notcontains $_ })
+            Save-Placement; Set-SelectMode $null; Build-Tabs; Show-TabByTitle $name
+            $note.Text = "✓  '$name': $($CustomTabs[$name].Count) mods"; $note.ForeColor = $G::Hex('#89D185')
+        }
+    }
+})
+$selAllBtn.Add_Click({
+    switch ($SelMode) {
+        'check'   { Set-SelectMode $null; Show-ModCheck 'all' }
+        'updates' { Set-SelectMode $null; Show-ModUpdates $null }
+    }
+})
 
 function Remove-ModCompletely($m, $log) {
     # failid
@@ -61,6 +124,8 @@ function Remove-ModCompletely($m, $log) {
     }
     # eemaldatud osade originaalid ja kirjed (osad.ps1)
     if (Get-Command Clear-ModParts -ErrorAction SilentlyContinue) { Clear-ModParts $m $log }
+    # modi pilt (pildid.ps1)
+    $pic = Join-Path $PSScriptRoot "pildid\$($m.Id).png"; if (Test-Path -LiteralPath $pic) { Remove-Item -LiteralPath $pic -Force }
     # allika link (uuendused.ps1)
     if (Get-Command Clear-ModSource -ErrorAction SilentlyContinue) { Clear-ModSource $m.Id }
     # arhiiv ja lahtipakitud kaust (teada ainult lülitist lisatud modidel)

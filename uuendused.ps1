@@ -130,7 +130,12 @@ function ConvertTo-GbInfo($model, $id, $json) {
     $cur = @(foreach ($f in @($j._aFiles)) { if ($f -and $f._idRow) { & $mk $f $false } })
     $arc = @(foreach ($f in @($j._aArchivedFiles)) { if ($f -and $f._idRow) { & $mk $f $true } })
     $upd = [long]$j._tsDateUpdated; if (-not $upd) { $upd = [long]$j._tsDateModified }; if (-not $upd) { $upd = [long]$j._tsDateAdded }
-    return @{ Model = $model; GbId = [long]$id; Name = [string]$j._sName; Url = (Get-GbUrl $model $id); Updated = $upd
+    # eelvaate pildid: suur (530 px või originaal), pisipilt (220/100), allkiri, mõõdud
+    $imgs = @(foreach ($im in @($j._aPreviewMedia._aImages)) { if ($im -and $im._sFile) {
+        @{ Url = "$($im._sBaseUrl)/$(if ($im._sFile530) { $im._sFile530 } else { $im._sFile })"
+           Thumb = "$($im._sBaseUrl)/$(if ($im._sFile220) { $im._sFile220 } elseif ($im._sFile100) { $im._sFile100 } else { $im._sFile })"
+           Caption = [string]$im._sCaption; W = [int]$im._wFile530; H = [int]$im._hFile530 } } })
+    return @{ Model = $model; GbId = [long]$id; Name = [string]$j._sName; Url = (Get-GbUrl $model $id); Updated = $upd; Images = $imgs
               Gone = [bool]($j._bIsTrashed -or $j._bIsWithheld -or $j._bIsPrivate); Cur = $cur; Arch = $arc }
 }
 function Complete-GbPage($r) {
@@ -160,7 +165,7 @@ function Search-Gb($query) {
         $t = Start-GbString $u
         try { Wait-Task $t } catch { continue }
         $j = $t.Result | ConvertFrom-Json
-        foreach ($r in @($j._aRecords)) { if ($r -and $r._idRow) { $out += @{ Model = $model; GbId = [long]$r._idRow; Name = [string]$r._sName; By = [string]$r._aSubmitter._sName } } }
+        foreach ($r in @($j._aRecords)) { if ($r -and $r._idRow) { $out += @{ Model = $model; GbId = [long]$r._idRow; Name = [string]$r._sName; By = [string]$r._aSubmitter._sName; SubCat = [string]$r._aSubCategory._sName; Likes = [int]$r._nLikeCount } } }
     }
     return , $out
 }
@@ -477,31 +482,46 @@ function Set-ModLinks($info, $rows) {
     Save-Sources $all
 }
 
-# Otsib GameBananast modi nime järgi; kindel ainult siis, kui lehel on sinu arhiivikaustas olev fail.
-# Tagastab @{ Info; Sure } või kandidaatide nimekirja (Cands).
+# Otsib GameBananast modi nime järgi.
+#  1. otsing ainult modi enda nimega (ilma kangelaseta: "Kitsune"), siis koos kangelasega - kangelase nimi uputaks
+#     muidu tulemused ("Kitsune Grey Talon" -> 110 suvalist Grey Talon modi)
+#  2. iga tulemus saab punkte: modi nime sõnad pealkirjas (+3 tk), kangelane pealkirjas või kategoorias (+2)
+#  3. kindel (Sure), kui lehel on sinu allalaadimiste kaustas olev fail; muidu "Likely", kui parim on selgelt parim
+# Tagastab @{ Info; Sure; Likely; Cands (punktide järjekorras) }
 function Find-ModPage($m, $names) {
     $q = Get-BaseName $m
     $hero = Get-HeroName $m
-    $seen = @{}; $cands = @()
-    foreach ($query in @("$q $hero".Trim(), $q) | Select-Object -Unique) {
-        foreach ($r in (Search-Gb $query)) { if (-not $seen["$($r.Model)/$($r.GbId)"]) { $seen["$($r.Model)/$($r.GbId)"] = 1; $cands += , $r } }
-        if ($cands.Count -ge 6) { break }
-    }
-    $heroT = Get-NameTokens "$hero $($m.Hero)"
+    $heroT = Get-NameTokens "$hero $($m.Hero)"   # (ilma @(): funktsioon tagastab juba massiivi)
+    $distinct = @((Get-NameTokens $q) | Where-Object { $heroT -notcontains $_ })
     $mine = @((Get-NameTokens "$q $(@($m.Files | ForEach-Object { $_.Off }) -join ' ')") | Where-Object { $heroT -notcontains $_ })
-    $try = @(@($cands | Where-Object { $_.Model -eq 'Mod' } | Select-Object -First 6) + @($cands | Where-Object { $_.Model -eq 'Sound' } | Select-Object -First 3))
-    foreach ($r in $try) {
-        # pealkiri peab modi nimega kattuma (kangelase nimi ei loe): muidu võib sobida mõne teise modi arhiiv
-        $title = @((Get-NameTokens $r.Name) | Where-Object { $heroT -notcontains $_ })
-        $hit = @($title | Where-Object { $t1 = $_; @($mine | Where-Object { $_ -eq $t1 -or ($t1.Length -ge 4 -and $_.Contains($t1)) -or ($_.Length -ge 4 -and $t1.Contains($_)) }).Count })
-        if (-not $hit.Count) { continue }
+    $seen = @{}; $cands = @()
+    $queries = @(($distinct -join ' '), "$q $hero".Trim(), $q) | Where-Object { $_ } | Select-Object -Unique
+    foreach ($query in $queries) {
+        foreach ($r in (Search-Gb $query)) { if (-not $seen["$($r.Model)/$($r.GbId)"]) { $seen["$($r.Model)/$($r.GbId)"] = 1; $cands += , $r } }
+    }
+    $tokMatch = { param($a, $b) $a -eq $b -or ($a.Length -ge 4 -and $b.Contains($a)) -or ($b.Length -ge 4 -and $a.Contains($b)) }
+    foreach ($r in $cands) {
+        $title = @(Get-NameTokens $r.Name)
+        $hitD = @($distinct | Where-Object { $d1 = $_; @($title | Where-Object { & $tokMatch $d1 $_ }).Count }).Count
+        $heroHit = [bool](@($heroT | Where-Object { $h1 = $_; @($title | Where-Object { & $tokMatch $h1 $_ }).Count }).Count) -or ($r.SubCat -and $hero -and $r.SubCat -like "*$hero*")
+        $r.Score = 3 * $hitD + $(if ($heroHit) { 2 } else { 0 }) + $(if ($r.Model -eq 'Mod') { 0.2 } else { 0 })
+        $r.AllWords = ($distinct.Count -gt 0 -and $hitD -eq $distinct.Count)
+        $r.HeroHit = $heroHit
+    }
+    $cands = @($cands | Sort-Object @{ e = { $_.Score }; Descending = $true }, @{ e = { $_.Likes }; Descending = $true })
+    # kindel: allalaaditud fail on lehel
+    foreach ($r in @($cands | Where-Object { $_.Score -ge 3 } | Select-Object -First 6)) {
         try { $info = Get-GbInfo $r.Model $r.GbId 60 } catch { continue }
-        if (@(Get-PageMatches $info $names).Count) { return @{ Info = $info; Sure = $true; Cands = $cands } }
+        if (@(Get-PageMatches $info $names).Count) { return @{ Info = $info; Sure = $true; Likely = $false; Cands = $cands } }
         Start-Sleep -Milliseconds 120
     }
-    return @{ Info = $null; Sure = $false; Cands = $cands }
+    # tõenäoline: kõik nime sõnad + õige kangelane (või kangelaseta mod) ja selgelt parem kui järgmine
+    $best = $cands[0]
+    if ($best -and $best.AllWords -and ($best.HeroHit -or -not $hero) -and ($cands.Count -eq 1 -or $cands[1].Score -lt $best.Score)) {
+        try { return @{ Info = (Get-GbInfo $best.Model $best.GbId 60); Sure = $false; Likely = $true; Cands = $cands } } catch {}
+    }
+    return @{ Info = $null; Sure = $false; Likely = $false; Cands = $cands }
 }
-
 # ---------- Aken: modi allikas ----------
 function Show-ModSource($id) {
     $m0 = $ById[$id]; if (-not $m0) { return }
@@ -618,8 +638,9 @@ function Show-ModSource($id) {
         try {
             $r = Find-ModPage $main $st.Names
             if ($r.Sure) { & $fill $r.Info; $info.Text = "Found (your downloaded file is on this page): " + $info.Text; return }
+            if ($r.Likely) { & $fill $r.Info; $info.Text = "Best match (name + hero) - check the files below look right: " + $info.Text; return }
             if (-not $r.Cands.Count) { $info.Text = 'Nothing found. Open GameBanana, find the mod and paste its link.'; return }
-            $info.Text = 'Not sure which one it is - pick from the list:'
+            $info.Text = 'Not sure which one it is - pick from the list (best matches first):'
             $menu = New-Object Windows.Forms.ContextMenuStrip; $menu.ShowImageMargin = $false; $menu.BackColor = $G::Raised; $menu.ForeColor = $G::Text
             foreach ($c in @($r.Cands | Select-Object -First 12)) {
                 $it = $menu.Items.Add("$($c.Name)   ·   by $($c.By)"); $it.Tag = $c
@@ -668,32 +689,58 @@ function Show-ModUpdates($onlyIds) {
 
     $d = New-Object Windows.Forms.Form
     $d.Text = 'Mod updates'; $d.BackColor = $DlgBg; $d.ForeColor = $DlgText; $d.Font = $FontUi
-    $d.FormBorderStyle = 'Sizable'; $d.MinimizeBox = $false; $d.StartPosition = 'CenterParent'
-    $d.ClientSize = New-Object Drawing.Size(980, 580); $d.MinimumSize = New-Object Drawing.Size(720, 400)
+    $d.FormBorderStyle = 'Sizable'; $d.StartPosition = 'CenterParent'; Enable-DialogMinimize $d
+    $d.ClientSize = New-Object Drawing.Size(980, 660); $d.MinimumSize = New-Object Drawing.Size(720, 480)
     $d.Add_HandleCreated({ $v = 1; [void][DlToggle.Native]::DwmSetWindowAttribute($this.Handle, 20, [ref]$v, 4) })
-    $lab = New-Object Windows.Forms.Label
-    $lab.AutoSize = $false; $lab.Size = New-Object Drawing.Size(948, 22); $lab.Anchor = 'Top, Left, Right'
-    $lab.ForeColor = $DlgText; $lab.Font = $FontChip; $lab.Location = New-Object Drawing.Point(16, 12); $lab.Text = 'Checking GameBanana…'
-    $bar = New-Object Windows.Forms.ProgressBar
-    $bar.Location = New-Object Drawing.Point(16, 38); $bar.Size = New-Object Drawing.Size(948, 8); $bar.Anchor = 'Top, Left, Right'; $bar.Maximum = [Math]::Max(1, $st.Total)
+    $hdr = New-DialogHeader $d 'Mod updates' "Looking up $($ids.Count) linked mod(s) on GameBanana"
+    $lab = New-Object DlUi.Banner
+    $lab.Location = New-Object Drawing.Point(16, 74); $lab.Size = New-Object Drawing.Size(948, 46); $lab.Anchor = 'Top, Left, Right'
+    $lab.Font = $FontChip; $lab.Kind = 0; $lab.Text = 'Checking GameBanana…'
+    $bar = New-Object DlUi.Bar
+    $bar.Location = New-Object Drawing.Point(16, 130); $bar.Size = New-Object Drawing.Size(948, 8); $bar.Anchor = 'Top, Left, Right'; $bar.Maximum = [Math]::Max(1, $st.Total)
     $sub = New-Object Windows.Forms.Label
-    $sub.AutoSize = $false; $sub.Size = New-Object Drawing.Size(948, 20); $sub.Anchor = 'Top, Left, Right'; $sub.AutoEllipsis = $true
-    $sub.ForeColor = $DlgMuted; $sub.Location = New-Object Drawing.Point(16, 50)
+    $sub.AutoSize = $false; $sub.Size = New-Object Drawing.Size(948, 20); $sub.Anchor = 'Top, Left, Right'; $sub.AutoEllipsis = $true; $sub.UseMnemonic = $false
+    $sub.ForeColor = $DlgMuted; $sub.Location = New-Object Drawing.Point(16, 144)
     $noLink = @($Mods | Where-Object { -not $all.ContainsKey($_.Id) -and -not ($_.Parent -and $all.ContainsKey($_.Parent)) }).Count
     $sub.Text = if ($onlyIds) { '' } else { "$($ids.Count) mod(s) have a source link. $noLink without: right-click a mod -> Source & updates…" }
     $lv = New-Object Windows.Forms.ListView
     $lv.View = 'Details'; $lv.FullRowSelect = $true; $lv.CheckBoxes = $true; $lv.ShowItemToolTips = $true
-    $lv.Location = New-Object Drawing.Point(16, 76); $lv.Size = New-Object Drawing.Size(948, 440); $lv.Anchor = 'Top, Bottom, Left, Right'
+    $lv.Location = New-Object Drawing.Point(16, 170); $lv.Size = New-Object Drawing.Size(948, 356); $lv.Anchor = 'Top, Bottom, Left, Right'
     $lv.BackColor = $G::Panel; $lv.ForeColor = $G::Text; $lv.BorderStyle = 'FixedSingle'; $lv.Font = $FontChip
-    foreach ($c in @(@('', 110), @('Mod', 220), @('On the page', 330), @('Details', 270))) { [void]$lv.Columns.Add($c[0], $c[1]) }
+    foreach ($c in @(@('Status', 118), @('Mod', 220), @('Newest file on GameBanana', 290), @('What it means', 300))) { [void]$lv.Columns.Add($c[0], $c[1]) }
+    # rühmad: mida teha tuleb, on üleval
+    $grp = [ordered]@{}
+    foreach ($gdef in @(
+        @('update', 'Updates - a newer version is on GameBanana (ticked = will be updated)'),
+        @('maybe', 'Maybe updates - the app is not sure, tick them yourself if you want'),
+        @('new', 'Optional extras on the page - tick to add them'),
+        @('problem', 'Problems'),
+        @('done', 'Done'),
+        @('ok', 'Up to date - nothing to do'))) {
+        $gg = New-Object Windows.Forms.ListViewGroup($gdef[0], $gdef[1]); [void]$lv.Groups.Add($gg); $grp[$gdef[0]] = $gg
+    }
+    # valitud rea kogu tekst (veergudes lõigatakse ära)
+    $det = New-Object Windows.Forms.Label
+    $det.AutoSize = $false; $det.Location = New-Object Drawing.Point(16, 532); $det.Size = New-Object Drawing.Size(948, 66); $det.Anchor = 'Bottom, Left, Right'
+    $det.BackColor = $G::Panel; $det.ForeColor = $G::Text; $det.Font = $FontChip; $det.BorderStyle = 'FixedSingle'; $det.UseMnemonic = $false
+    $det.Padding = New-Object Windows.Forms.Padding(8, 5, 8, 5); $det.Text = 'Click a row to see all of its text here.'
+    [DlUi.ListStyle]::Apply($lv, 26)
+    # veerud jagavad kogu laiuse (staatus fikseeritud, ülejäänu protsentides) - midagi ei jää akna taha
+    $fitCols = { $w = $lv.ClientSize.Width - 112 - 4; if ($w -gt 300) { $lv.Columns[0].Width = 112; $lv.Columns[1].Width = [int]($w * 0.22); $lv.Columns[2].Width = [int]($w * 0.33); $lv.Columns[3].Width = $w - $lv.Columns[1].Width - $lv.Columns[2].Width } }
+    $lv.Add_Resize($fitCols)
+    $lv.Add_SelectedIndexChanged({
+        if (-not $lv.SelectedItems.Count) { return }
+        $it = $lv.SelectedItems[0]
+        $det.Text = "$($it.Text)   ·   $($it.SubItems[1].Text)`nOn the page: $($it.SubItems[2].Text)`n$($it.SubItems[3].Text)"
+    })
     $go = New-Pill 'Update checked' $true; $go.FitWidth(22, 36); $go.Anchor = 'Bottom, Right'; $go.Enabled = $false
     $close = New-Pill 'Close' $false; $close.FitWidth(18, 36); $close.Anchor = 'Bottom, Right'
-    $close.Location = New-Object Drawing.Point((964 - $close.Width), 530)
-    $go.Location = New-Object Drawing.Point(($close.Left - $go.Width - 10), 530)
+    $close.Location = New-Object Drawing.Point((964 - $close.Width), 610)
+    $go.Location = New-Object Drawing.Point(($close.Left - $go.Width - 10), 610)
     $close.Add_Click({ $d.Close() })
     $hint = New-Object Windows.Forms.Label
-    $hint.AutoSize = $true; $hint.ForeColor = $DlgMuted; $hint.Anchor = 'Bottom, Left'; $hint.Location = New-Object Drawing.Point(16, 540)
-    $hint.Text = 'Right-click a row: open the page, ignore a file. The old version is deleted after a successful update.'
+    $hint.AutoSize = $true; $hint.ForeColor = $DlgMuted; $hint.Anchor = 'Bottom, Left'; $hint.Location = New-Object Drawing.Point(16, 620)
+    $hint.Text = 'Updating replaces the old version in the same place (stays on/off). Right-click a row: open the page or hide a file.'
 
     $addRow = {
         param($x)
@@ -703,41 +750,52 @@ function Show-ModUpdates($onlyIds) {
         [void]$row.SubItems.Add($mn); [void]$row.SubItems.Add(''); [void]$row.SubItems.Add('')
         switch ($x.Kind) {
             'update' {
-                $row.Text = '⟳ Update'
-                $row.SubItems[2].Text = "$($x.New.Name)  ($(Format-GbDate $x.New.Date), $(Format-Size $x.New.Size))"
-                $row.SubItems[3].Text = $(if ($x.Link.File) { "You have: $($x.Link.Name) ($(Format-GbDate $x.Link.Date)). " } else { "Your version: unknown. " }) + $x.Why + $(if (-not $x.Sure) { ' (best guess)' } else { '' })
-                $row.ToolTipText = "$($RoleNames[$x.Link.Role]): $($x.Link.Name) -> $($x.New.Name)`n$($x.New.Desc)"
-                $row.ForeColor = [DlUi.G]::Hex('#2E7D32'); $row.Checked = [bool]$x.Sure
+                $new = "$($x.New.Name)  ($(Format-GbDate $x.New.Date), $(Format-Size $x.New.Size))"
+                $row.SubItems[2].Text = $new
+                if ($x.Sure) {
+                    $row.Text = '⟳ Update'; $row.Group = $grp['update']; $row.Checked = $true
+                    $row.SubItems[3].Text = "Newer. Yours is from $(Format-GbDate $x.Link.Date)."
+                } elseif (-not $x.Link.File) {
+                    $row.Text = '? Update'; $row.Group = $grp['maybe']
+                    $row.SubItems[3].Text = "Probably newer - your file is gone from the page. Safe to update."
+                } else {
+                    $row.Text = '? Update'; $row.Group = $grp['maybe']
+                    $row.SubItems[3].Text = "Probably newer - file name changed. Open the page to check."
+                }
+                $row.ToolTipText = "$($x.New.Desc)"
+                $row.ForeColor = [DlUi.G]::Hex('#1F5F24')
                 $st.Updates++
             }
             'new' {
-                $row.Text = if ($x.Role -eq 'addon') { '+ New add-on' } else { '+ New alt' }
+                $row.Text = if ($x.Role -eq 'addon') { '+ Add-on' } else { '+ Other version' }
+                $row.Group = $grp['new']
                 $row.SubItems[2].Text = "$($x.New.Name)  ($(Format-GbDate $x.New.Date), $(Format-Size $x.New.Size))" + $(if ($x.New.Desc) { " - $($x.New.Desc)" } else { '' })
-                $row.SubItems[3].Text = if ($x.Role -eq 'addon') { 'Tick to add it to this mod (goes on with the mod)' } else { 'Tick to add it as its own skin (same hero, one on at a time)' }
+                $row.SubItems[3].Text = if ($x.Role -eq 'addon') { 'Extra for this mod. Tick to add.' } else { 'Another version (one on at a time). Tick to add.' }
                 $row.ToolTipText = $x.New.Desc
-                $row.ForeColor = [DlUi.G]::Hex('#9A6A12')
+                $row.ForeColor = [DlUi.G]::Hex('#6E4A08')
             }
             'nosucc' {
-                $row.Text = '! Missing'
-                $row.SubItems[2].Text = "Your file $($x.Link.Name) is no longer on the page"
-                $row.SubItems[3].Text = 'No replacement found: open Source & updates… and pick the file'
-                $row.ForeColor = [DlUi.G]::Hex('#B03A2E')
+                $row.Text = '! Missing'; $row.Group = $grp['problem']
+                $row.SubItems[2].Text = "(your file $($x.Link.Name) was removed)"
+                $row.SubItems[3].Text = 'Your file was removed. Right-click -> Source & updates to pick.'
+                $row.ForeColor = [DlUi.G]::Hex('#8E2A20')
             }
             'gone' {
-                $row.Text = '✕ Page gone'; $row.SubItems[2].Text = $x.Info.Url; $row.SubItems[3].Text = 'Removed or hidden by the author. Your mod stays as it is.'
-                $row.ForeColor = [DlUi.G]::Hex('#B03A2E')
+                $row.Text = '✕ Page gone'; $row.Group = $grp['problem']; $row.SubItems[2].Text = $x.Info.Url
+                $row.SubItems[3].Text = 'Page removed. Your mod still works, no updates.'
+                $row.ForeColor = [DlUi.G]::Hex('#8E2A20')
             }
             'error' {
-                $row.Text = '! Error'; $row.SubItems[2].Text = $x.Url; $row.SubItems[3].Text = $x.Err; $row.ForeColor = [DlUi.G]::Hex('#B03A2E')
+                $row.Text = '! Error'; $row.Group = $grp['problem']; $row.SubItems[2].Text = $x.Url
+                $row.SubItems[3].Text = "Could not check: $($x.Err)"; $row.ForeColor = [DlUi.G]::Hex('#8E2A20')
             }
             default {
-                $row.Text = '✓ Up to date'; $row.SubItems[2].Text = "$($x.Info.Name)"
-                $row.SubItems[3].Text = "Page updated $(Format-GbDate $x.Info.Updated)"; $row.ForeColor = [DlUi.G]::Muted
+                $row.Text = '✓ Up to date'; $row.Group = $grp['ok']; $row.SubItems[2].Text = "$($x.Info.Name)"
+                $row.SubItems[3].Text = "Newest already (page changed $(Format-GbDate $x.Info.Updated))."; $row.ForeColor = [DlUi.G]::Text
             }
         }
         $row.Tag = $x
-        if ($x.Kind -in 'update', 'new') { [void]$lv.Items.Insert(@($lv.Items | Where-Object { $_.Tag.Kind -in 'update', 'new' }).Count, $row) }
-        else { [void]$lv.Items.Add($row) }
+        [void]$lv.Items.Add($row)
     }
     $updateGo = {
         $n = @($lv.Items | Where-Object { $_.Checked -and $_.Tag.Kind -in 'update', 'new' -and -not $_.Tag.Done }).Count
@@ -768,7 +826,13 @@ function Show-ModUpdates($onlyIds) {
         if ($st.Busy -or $st.Closing) { return }
         if (-not $st.Queue.Count) {
             $timer.Stop(); $bar.Value = $bar.Maximum
-            $lab.Text = if ($st.Updates) { "$($st.Updates) update(s) found. Tick what to update and press 'Update checked'." } elseif ($st.Total) { '✓  Everything is up to date.' } else { 'No mod has a source link yet. Right-click a mod -> Source & updates…' }
+            $probs = @($lv.Items | Where-Object { $_.Tag.Kind -in 'nosucc', 'gone', 'error' }).Count
+            if ($st.Updates) { $lab.Kind = 2; $lab.Text = "Done - $($st.Updates) mod(s) can be updated. The ticked ones are updated when you press 'Update checked'." }
+            elseif ($probs) { $lab.Kind = 2; $lab.Text = "Done - no updates, but $probs mod(s) have a problem (see Problems)." }
+            elseif ($st.Total) { $lab.Kind = 1; $lab.Text = 'Done - all your linked mods are up to date. Nothing to do.' }
+            else { $lab.Kind = 2; $lab.Text = 'No mod has a source link yet. Right-click a mod -> Source & updates…' }
+            $hdr.Sub.Text = "Finished: $($ids.Count) linked mod(s) checked"
+            [DlUi.Notify]::Done($form, [bool]($st.Updates -or $probs))
             & $updateGo; return
         }
         $st.Busy = $true
@@ -802,20 +866,24 @@ function Show-ModUpdates($onlyIds) {
                     $res = Invoke-SourceAdd $x $status
                     $row.Text = '✓ Added'; $row.SubItems[3].Text = "Added as '$($res.Name)' (in New, off)"
                 }
-                $row.Checked = $false; $x.Done = $true; $row.ForeColor = [DlUi.G]::Hex('#3E7A26'); $ok++; $st.Changed = $true
+                $row.Checked = $false; $x.Done = $true; $row.ForeColor = [DlUi.G]::Hex('#1F5F24'); $row.Group = $grp['done']; $ok++; $st.Changed = $true
             } catch {
                 $row.Text = '✕ Failed'; $row.SubItems[3].Text = "$_"; $row.ToolTipText = "$_"; $bad++
             }
         }
         $d.Cursor = 'Default'; $close.Enabled = $true; $st.Busy = $false
-        $lab.Text = "Done: $ok" + $(if ($bad) { ", $bad failed (see Details)" } else { '' }) + '.'
+        $lab.Kind = $(if ($bad) { 3 } else { 1 })
+        $lab.Text = "Updated $ok mod(s)" + $(if ($bad) { ", $bad failed - click the row to see why" } else { '. Old versions were deleted.' })
+        [DlUi.Notify]::Done($form, [bool]$bad)
         $sub.Text = "New archives are in $ArchiveDir. Updated mods keep their place and on/off state."
         & $updateGo
     })
 
-    $d.Add_Shown({ $d.Refresh(); $timer.Start() })
+    $d.Add_Shown({ & $fitCols; $d.Refresh(); $timer.Start() })
     $d.Add_FormClosing({ $st.Closing = $true; $timer.Stop() })
-    $d.Controls.AddRange(@($lab, $bar, $sub, $lv, $hint, $go, $close))
+    $d.Controls.AddRange(@($lab, $bar, $sub, $lv, $det, $hint, $go, $close))
+    $wa = [Windows.Forms.Screen]::FromControl($form).WorkingArea
+    $d.ClientSize = New-Object Drawing.Size([Math]::Min(1240, $wa.Width - 60), [Math]::Min(700, $wa.Height - 60))
     try { [void]$d.ShowDialog($form) }
     finally {
         $timer.Dispose()
@@ -836,7 +904,7 @@ function Show-ModUpdates($onlyIds) {
 $updBtn = New-Pill '⟳  Updates' $false
 $updBtn.Font = $FontChip; $updBtn.Dark = $Deco; $updBtn.FitWidth(16, 36)
 $header.Controls.Add($updBtn)
-$updBtn.Add_Click({ Show-ModUpdates $null })
+$updBtn.Add_Click({ if ($SelMode -eq 'updates') { Set-SelectMode $null } elseif (Show-Intro 'updates') { Set-SelectMode 'updates' } })   # valikurežiim (kustutamine.ps1)
 $UpdTip = New-Object Windows.Forms.ToolTip
 $UpdTip.SetToolTip($updBtn, 'Check GameBanana for new versions of your mods (mods need a source link: right-click -> Source & updates…)')
 
@@ -1005,6 +1073,8 @@ function Add-ModFromLink($text) {
                 if (-not $l -or -not $m) { continue }
                 $role = Get-RoleGuess $l.C $inf.Cur; if ($m.Parent -and $role -eq 'main') { $role = 'addon' }
                 Set-ModLinks $inf @(for ($i = 0; $i -lt $m.Files.Count; $i++) { @{ Mod = $m; Index = $i; File = $l.C; Role = $role } })
+                # pilt GameBananast (pildid.ps1), kui modil veel pole
+                if (-not $m.Parent -and (Get-Command Save-ModPictureFromGb -ErrorAction SilentlyContinue) -and -not (Get-ModPicture $m.Id)) { try { Save-ModPictureFromGb $m.Id $inf; Build-Tabs } catch {} }
             }
         }
         # lisamata jäänud allalaadimised ära
@@ -1021,7 +1091,7 @@ function Add-ModFromLink($text) {
 # "+ Add mod" menüü: failid või link
 $AddMenu = New-Object Windows.Forms.ContextMenuStrip
 $AddMenu.ShowImageMargin = $false; $AddMenu.BackColor = $G::Raised; $AddMenu.ForeColor = $G::Text; $AddMenu.Font = $FontUi
-$miAddFiles = $AddMenu.Items.Add('From files on this PC…   (or drop them on the window)')
+$miAddFiles = $AddMenu.Items.Add('From files on this PC…   (pick one or many: Ctrl+click / Shift+click)')
 $miAddLink = $AddMenu.Items.Add('From a link…   (GameBanana, Deadlock Mod Manager, direct link)')
 $miAddFiles.Add_Click({ Start-AddMod })
 $miAddLink.Add_Click({ Add-ModFromLink $null })

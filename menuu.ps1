@@ -35,6 +35,10 @@ function Get-MenuModId($src) {
 
 $ModMenu.Add_Opening({
     $script:MenuId = Get-MenuModId $ModMenu.SourceControl
+    # paremklõps "n" märgil -> menüü (ja pilt) on selle "n" versiooni jaoks
+    $sc = $ModMenu.SourceControl; $ch = $null
+    while ($sc) { if ($sc -is [DlUi.Chip]) { $ch = $sc; break }; if ($sc -is [DlUi.Card]) { if ($sc.Tag -is [DlUi.Chip]) { $ch = $sc.Tag }; break }; $sc = $sc.Parent }
+    if ($ch -and $ch.AltBadge -and $ch.AccessibleDescription -and $ch.IsOnBadge($ch.PointToClient([Windows.Forms.Cursor]::Position))) { $script:MenuId = $ch.AccessibleDescription }
     if (-not $script:MenuId -or -not $ById[$script:MenuId]) { $_.Cancel = $true; return }
     $m = $ById[$script:MenuId]
     $orig = if ($m.OrigName) { $m.OrigName } else { $m.Name }
@@ -207,7 +211,7 @@ function New-CustomTab([bool]$openBulk = $true) {
     Save-Placement
     Build-Tabs
     Show-TabByTitle $n
-    if ($openBulk) { Show-BulkAdd $n }   # kohe modide valik
+    if ($openBulk) { Set-SelectMode 'tab' $n }   # kohe modide valik (klõpsa modidel, siis "Save tab")
     return $n
 }
 
@@ -236,7 +240,7 @@ $miTabDelete = $TabMenu.Items.Add('Delete tab (mods are kept)')
 $miTabDelete.ForeColor = $G::Hex('#F48771')
 $TabMenu.Add_Opening({ $script:TabMenuTitle = $TabMenu.SourceControl.AccessibleName })
 
-$miTabBulk.Add_Click({ Show-BulkAdd $script:TabMenuTitle })
+$miTabBulk.Add_Click({ Set-SelectMode 'tab' $script:TabMenuTitle })
 $miTabRename.Add_Click({
     $old = $script:TabMenuTitle
     $n = Show-RenameDialog $old 'Rename tab' 'New tab name'
