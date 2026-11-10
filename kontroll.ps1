@@ -244,7 +244,7 @@ function Get-UiConflicts($on) {
     $paths = New-Object Collections.Generic.List[string]; $src = New-Object Collections.ArrayList
     foreach ($id in $on) {
         $m = $ById[$id]; if (-not $m) { continue }
-        foreach ($f in $m.Files) { $p = Get-ModFilePath $f; if ($p) { $paths.Add($p); [void]$src.Add(@{ Mod = $m; Pak = [int]($f.Pak -replace '\D', '') }) } }
+        foreach ($f in $m.Files) { $p = Get-ModFilePath $f; if ($p) { $paths.Add($p); [void]$src.Add(@{ Mod = $m; Pak = [int]($f.Pak -replace '\D', ''); File = $f }) } }
     }
     if (-not $paths.Count) { return , $out }
     $byEntry = @{}
@@ -255,6 +255,8 @@ function Get-UiConflicts($on) {
         [void]$byEntry[$k].Add($src[[int]$Matches[1]])
     }
     $family = { param($a, $b) $a.Id -eq $b.Id -or $a.Parent -eq $b.Id -or $b.Parent -eq $a.Id -or ($a.Parent -and $a.Parent -eq $b.Parent) }
+    $hasCode = @{}   # modid, millel on oma layout / skript
+    foreach ($k in $byEntry.Keys) { if ($k -match '^panorama/(layout|scripts)/') { foreach ($s in $byEntry[$k]) { $hasCode[$s.Mod.Id] = $true } } }
     $wins = @{}; $lost = @{}   # mod id -> entries
     foreach ($k in $byEntry.Keys) {
         $win = @($byEntry[$k] | Sort-Object { $_.Pak })[0]
@@ -271,9 +273,28 @@ function Get-UiConflicts($on) {
         $m = $ById[$id]
         $others = @($styles | ForEach-Object { $lost[$id][$_] } | Sort-Object { $_.Id } -Unique)
         $names = ($styles | ForEach-Object { [IO.Path]::GetFileNameWithoutExtension($_) -replace '\.vcss$', '' }) -join ', '
-        [void]$out.Add(@{ Level = 'Error'; Mod = $m; Kind = 'uisplit'; Data = @{ Mod = $m; Other = $others }; Fix = $null
+        # Parandus: need stiilifailid välja kõigist modidest, mis on selle modi ees (väiksem pak). Ainult siis, kui
+        # need modid muudavad ekraanil ainult stiili (oma layout'i/skripti pole) - siis kaob neil vaid väike muutus (nt sildi värv).
+        $fixes = @{}; $fixable = $true
+        foreach ($k in $styles) {
+            $mine = @($byEntry[$k] | Where-Object { $_.Mod.Id -eq $id } | Sort-Object { $_.Pak })[0]
+            foreach ($s in $byEntry[$k]) {
+                if ($s.Pak -ge $mine.Pak -or (& $family $s.Mod $m)) { continue }
+                if ($hasCode[$s.Mod.Id]) { $fixable = $false; break }
+                $fk = $s.File.Off
+                if (-not $fixes[$fk]) { $fixes[$fk] = @{ File = $s.File; Mod = $s.Mod; Drop = New-Object Collections.ArrayList } }
+                if ($fixes[$fk].Drop -notcontains $k) { [void]$fixes[$fk].Drop.Add($k) }
+            }
+        }
+        $dropMods = @($fixes.Values | ForEach-Object { $_.Mod } | Sort-Object { $_.Id } -Unique)
+        $x = @{ Level = 'Error'; Mod = $m; Kind = 'uisplit'; Data = @{ Mod = $m; Other = $others; Fixes = @($fixes.Values); DropMods = $dropMods }; Fix = $null
             Text = "Screen can look broken (e.g. overlapping text): this mod's layout is used, but its style file ($names) comes from $(($others | ForEach-Object { $_.Name }) -join ', ') (lower pak number wins)"
-            FixText = "Turn off this mod or $(($others | ForEach-Object { $_.Name }) -join ' / ')" })
+            FixText = "Turn off this mod or $(($others | ForEach-Object { $_.Name }) -join ' / ')" }
+        if ($fixable -and $fixes.Count) {
+            $x.Fix = 'uisplit'
+            $x.FixText = "Remove $names from $(($dropMods | ForEach-Object { $_.Name }) -join ', ') (they only change its look there, e.g. a colour; originals are kept)"
+        }
+        [void]$out.Add($x)
     }
     return , $out
 }
@@ -288,8 +309,20 @@ function Confirm-UiConflicts {
     $bad = @($found | Where-Object { $new[$_.Data.Mod.Id] -or @($_.Data.Other | Where-Object { $new[$_.Id] }).Count })
     if (-not $bad.Count) { return $true }
     $lines = ($bad | ForEach-Object { "•  $($_.Data.Mod.Name)  +  $(($_.Data.Other | ForEach-Object { $_.Name }) -join ', ')" }) -join "`n"
-    $r = [Windows.Forms.MessageBox]::Show($form, "These mods change the same screen files, and together the game screen will look broken (for example overlapping text on hero tags):`n`n$lines`n`nTurn one of them off.`n`nSave anyway?", 'Deadlock Mods', 'YesNo', 'Warning', 'Button2')
-    return ($r -eq 'Yes')
+    $msg = "These mods change the same screen files, and together the game screen will look broken (for example overlapping text on hero tags):`n`n$lines"
+    if (@($bad | Where-Object { $_.Fix -ne 'uisplit' }).Count) {
+        $r = [Windows.Forms.MessageBox]::Show($form, "$msg`n`nTurn one of them off.`n`nSave anyway?", 'Deadlock Mods', 'YesNo', 'Warning', 'Button2')
+        return ($r -eq 'Yes')
+    }
+    # kõik parandatavad: stiilifail välja nendest, kes seda ainult natuke muudavad (nt sildi värv)
+    $fixLines = ($bad | ForEach-Object { "•  $($_.FixText)" }) -join "`n"
+    $r = [Windows.Forms.MessageBox]::Show($form, "$msg`n`nThis can be fixed so all of them work:`n$fixLines`n`nYes = fix it and save`nNo = save without fixing`nCancel = go back", 'Deadlock Mods', 'YesNoCancel', 'Warning', 'Button1')
+    if ($r -eq 'Cancel') { return $false }
+    if ($r -eq 'Yes') {
+        try { foreach ($x in $bad) { Invoke-CheckFix $x } }
+        catch { [Windows.Forms.MessageBox]::Show($form, "Fixing failed:`n`n$($_.Exception.Message)", 'Deadlock Mods', 'OK', 'Error') | Out-Null; return $false }
+    }
+    return $true
 }
 
 # Põhjalik kontroll ühele modi failile (vanad jagatud failid + kaamera)
@@ -333,6 +366,21 @@ function Backup-Original($path, $dir) {
     Copy-Item -LiteralPath $path -Destination $b
 }
 
+# Modi failist ($f = modi Files kirje) need sisefailid välja; original läheb check_originals kausta.
+function Remove-VpkEntries($f, $drop) {
+    $path = Get-ModFilePath $f
+    if (-not $path) { throw 'File not found.' }
+    $lst = Join-Path $env:TEMP ("dlchk_" + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.txt')
+    $tmp = [IO.Path]::ChangeExtension($lst, '.vpk')
+    [IO.File]::WriteAllLines($lst, [string[]]@($drop))
+    try {
+        Run $Python -I (Join-Path $ToolsDir 'vpkdrop.py') $path $tmp "@$lst" | Out-Null
+        if (-not (Test-Path -LiteralPath $tmp)) { throw 'Removing the files failed.' }
+        Backup-Original $path $CheckOriginals
+        Copy-Item -LiteralPath $tmp -Destination $path -Force
+    } finally { Remove-Item -LiteralPath $lst, $tmp -Force -ErrorAction SilentlyContinue }
+}
+
 # Üks parandus. Viskab erandi, kui ei õnnestu.
 function Invoke-CheckFix($x) {
     switch ($x.Fix) {
@@ -374,19 +422,8 @@ function Invoke-CheckFix($x) {
             $o[$m.Id] = $nums
             [IO.File]::WriteAllText($PakFile, (ConvertTo-Json $o), (New-Object Text.UTF8Encoding $false))
         }
-        'stale' {
-            $f = $x.Data.File; $path = Get-ModFilePath $f
-            if (-not $path) { throw 'File not found.' }
-            $lst = Join-Path $env:TEMP ("dlchk_" + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.txt')
-            $tmp = [IO.Path]::ChangeExtension($lst, '.vpk')
-            [IO.File]::WriteAllLines($lst, [string[]]$x.Data.Drop)
-            try {
-                Run $Python -I (Join-Path $ToolsDir 'vpkdrop.py') $path $tmp "@$lst" | Out-Null
-                if (-not (Test-Path -LiteralPath $tmp)) { throw 'Removing the files failed.' }
-                Backup-Original $path $CheckOriginals
-                Copy-Item -LiteralPath $tmp -Destination $path -Force
-            } finally { Remove-Item -LiteralPath $lst, $tmp -Force -ErrorAction SilentlyContinue }
-        }
+        'stale' { Remove-VpkEntries $x.Data.File $x.Data.Drop }
+        'uisplit' { foreach ($fx in $x.Data.Fixes) { Remove-VpkEntries $fx.File @($fx.Drop) } }
         'camera' {
             $f = $x.Data.File; $path = Get-ModFilePath $f
             if (-not $path) { throw 'File not found.' }
