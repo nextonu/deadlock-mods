@@ -134,7 +134,7 @@ function Show-ModParts($id) {
 
     $d = New-Object Windows.Forms.Form
     $d.Text = "Parts: $($m.Name)"; $d.BackColor = $DlgBg; $d.ForeColor = $DlgText; $d.Font = $FontUi
-    $d.FormBorderStyle = 'Sizable'; $d.MinimizeBox = $false; $d.StartPosition = 'CenterParent'
+    $d.FormBorderStyle = 'Sizable'; Enable-DialogMinimize $d; $d.StartPosition = 'CenterParent'
     $d.ClientSize = New-Object Drawing.Size(620, 460); $d.MinimumSize = New-Object Drawing.Size(480, 320)
     $d.Add_HandleCreated({ $v = 1; [void][DlToggle.Native]::DwmSetWindowAttribute($this.Handle, 20, [ref]$v, 4) })
     $lab = New-Object Windows.Forms.Label
@@ -170,7 +170,7 @@ function Show-ModParts($id) {
                 $row = New-Object Windows.Forms.ListViewItem($PartLabel[$k])
                 [void]$row.SubItems.Add([string]$groups[$k].Count)
                 [void]$row.SubItems.Add($(if ($isOut) { '✕ removed (double-click: put back)' } else { 'in the mod' }))
-                if ($isOut) { $row.ForeColor = [DlUi.G]::Hex('#B03A2E') }
+                if ($isOut) { $row.ForeColor = [DlUi.G]::Fg('#B03A2E') }
                 $ex = @($groups[$k] | Select-Object -First 6) -join "`n"; if ($groups[$k].Count -gt 6) { $ex += "`n… $($groups[$k].Count - 6) more" }
                 $row.ToolTipText = $ex
                 $row.Tag = @{ File = $f; Key = $k; Count = $groups[$k].Count; Out = $isOut }
@@ -211,7 +211,7 @@ function Show-ModParts($id) {
 function Add-PartsTab {
     $recs = @(Get-PartRecords | Where-Object { $ById.ContainsKey($_.Mod) })
     if (-not $recs.Count) { return }
-    Add-Tab "Removed parts ($($recs.Count))" @() $false $false 'Parts you took out of mods (right-click a mod -> Parts…). Put them back or delete them for good.'
+    Add-Tab "Removed parts ($($recs.Count))" @() $false $false 'Parts you took out of mods (right-click a mod -> Parts…). Put them back or delete them for good.' $false $true   # kohe ehitatud: allpool lisatakse lehele read
     $tab = $TabBtns[-1]
     $page = $tab.Page
     $top = $page.Controls[0]

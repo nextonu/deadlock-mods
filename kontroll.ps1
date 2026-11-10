@@ -37,7 +37,7 @@ function Show-CheckPicker {
     if ($env:DLTEST -and -not $env:DLTEST_INTRO) { return 'all' }
     $d = New-Object Windows.Forms.Form
     $d.Text = 'Check mods'; $d.BackColor = $DlgBg; $d.ForeColor = $DlgText; $d.Font = $FontUi
-    $d.FormBorderStyle = 'Sizable'; $d.MinimizeBox = $false; $d.StartPosition = 'CenterParent'
+    $d.FormBorderStyle = 'Sizable'; Enable-DialogMinimize $d; $d.StartPosition = 'CenterParent'
     $d.ClientSize = New-Object Drawing.Size(640, 690); $d.MinimumSize = New-Object Drawing.Size(520, 520)
     $d.Add_HandleCreated({ $v = 1; [void][DlToggle.Native]::DwmSetWindowAttribute($this.Handle, 20, [ref]$v, 4) })
     $info = New-Object Windows.Forms.Label
@@ -150,7 +150,7 @@ function Show-Intro($key) {
     $info = $IntroText[$key]
     $d = New-Object Windows.Forms.Form
     $d.Text = $info.Title; $d.BackColor = $DlgBg; $d.ForeColor = $DlgText; $d.Font = $FontUi
-    $d.FormBorderStyle = 'FixedDialog'; $d.MaximizeBox = $false; $d.MinimizeBox = $false; $d.StartPosition = 'CenterParent'
+    $d.FormBorderStyle = 'FixedDialog'; $d.MaximizeBox = $false; Enable-DialogMinimize $d; $d.StartPosition = 'CenterParent'
     $d.Add_HandleCreated({ $v = 1; [void][DlToggle.Native]::DwmSetWindowAttribute($this.Handle, 20, [ref]$v, 4) })
     $l = New-Object Windows.Forms.Label
     $l.AutoSize = $true; $l.MaximumSize = New-Object Drawing.Size(600, 0); $l.UseMnemonic = $false
@@ -229,7 +229,67 @@ function Get-QuickFindings {
         if ($known[$f.Name.ToLower()]) { continue }
         [void]$out.Add(@{ Level = 'Info'; Mod = $null; Text = "Unused file in addons_off (no mod uses it): $($f.Name)  $([Math]::Round($f.Length / 1MB, 1)) MB"; Kind = 'orphan'; Data = $f.FullName; Fix = 'orphan'; FixText = 'Move it to Downloads\Muu\deadlock_mods\orphans' })
     }
+    # mängus olevate modide jagatud ekraanifailid
+    try { foreach ($x in (Get-UiConflicts @($Mods | Where-Object { Test-On $_ } | ForEach-Object { $_.Id }))) { [void]$out.Add($x) } } catch {}
     return , $out
+}
+
+# Ekraanifailid (panorama layout / styles / scripts), mida mitu sees olevat modi muudavad. Iga faili puhul
+# kasutab mäng väikseima pak-numbriga modi oma. Kui modi enda layout või skript jääb kehtima, aga tema
+# stiilifail tuleb teiselt modilt, läheb ekraan segi (nt kangelase valikus kattuvad sildid).
+# $on = sees olevate modide id-d. Tagastab leiud (Kind 'uisplit', Data = @{ Mod; Other }).
+function Get-UiConflicts($on) {
+    $out = New-Object Collections.ArrayList
+    if (-not $Python) { return , $out }
+    $paths = New-Object Collections.Generic.List[string]; $src = New-Object Collections.ArrayList
+    foreach ($id in $on) {
+        $m = $ById[$id]; if (-not $m) { continue }
+        foreach ($f in $m.Files) { $p = Get-ModFilePath $f; if ($p) { $paths.Add($p); [void]$src.Add(@{ Mod = $m; Pak = [int]($f.Pak -replace '\D', '') }) } }
+    }
+    if (-not $paths.Count) { return , $out }
+    $byEntry = @{}
+    foreach ($l in (Run $Python -I (Join-Path $ToolsDir 'vpkui.py') @($paths))) {
+        if ($l -notmatch '^(\d+)\t(panorama/.+)$') { continue }
+        $k = $Matches[2].ToLower()
+        if (-not $byEntry.ContainsKey($k)) { $byEntry[$k] = New-Object Collections.ArrayList }
+        [void]$byEntry[$k].Add($src[[int]$Matches[1]])
+    }
+    $family = { param($a, $b) $a.Id -eq $b.Id -or $a.Parent -eq $b.Id -or $b.Parent -eq $a.Id -or ($a.Parent -and $a.Parent -eq $b.Parent) }
+    $wins = @{}; $lost = @{}   # mod id -> entries
+    foreach ($k in $byEntry.Keys) {
+        $win = @($byEntry[$k] | Sort-Object { $_.Pak })[0]
+        foreach ($s in $byEntry[$k]) {
+            $id = $s.Mod.Id
+            if ($s.Mod.Id -eq $win.Mod.Id) { if (-not $wins[$id]) { $wins[$id] = @{} }; $wins[$id][$k] = 1 }
+            elseif (-not (& $family $s.Mod $win.Mod)) { if (-not $lost[$id]) { $lost[$id] = @{} }; $lost[$id][$k] = $win.Mod }
+        }
+    }
+    foreach ($id in $lost.Keys) {
+        $code = @($wins[$id].Keys | Where-Object { $_ -match '^panorama/(layout|scripts)/' })
+        $styles = @($lost[$id].Keys | Where-Object { $_ -match '^panorama/styles/' } | Sort-Object)
+        if (-not $code.Count -or -not $styles.Count) { continue }   # kogu ekraaniosa võidab teine mod -> lihtsalt tema oma kehtib
+        $m = $ById[$id]
+        $others = @($styles | ForEach-Object { $lost[$id][$_] } | Sort-Object { $_.Id } -Unique)
+        $names = ($styles | ForEach-Object { [IO.Path]::GetFileNameWithoutExtension($_) -replace '\.vcss$', '' }) -join ', '
+        [void]$out.Add(@{ Level = 'Error'; Mod = $m; Kind = 'uisplit'; Data = @{ Mod = $m; Other = $others }; Fix = $null
+            Text = "Screen can look broken (e.g. overlapping text): this mod's layout is used, but its style file ($names) comes from $(($others | ForEach-Object { $_.Name }) -join ', ') (lower pak number wins)"
+            FixText = "Turn off this mod or $(($others | ForEach-Object { $_.Name }) -join ' / ')" })
+    }
+    return , $out
+}
+
+# Save'i ajal: kas see salvestus teeb ekraanifailide segaduse (ainult need, kus mõni mod lülitatakse just sisse).
+# Tagastab $true, kui võib salvestada.
+function Confirm-UiConflicts {
+    $on = @($Mods | Where-Object { $State[$_.Id] } | ForEach-Object { $_.Id })
+    $new = @{}; foreach ($m in $Mods) { if ($State[$m.Id] -and -not (Test-On $m)) { $new[$m.Id] = 1 } }
+    if (-not $new.Count) { return $true }
+    try { $found = Get-UiConflicts $on } catch { return $true }
+    $bad = @($found | Where-Object { $new[$_.Data.Mod.Id] -or @($_.Data.Other | Where-Object { $new[$_.Id] }).Count })
+    if (-not $bad.Count) { return $true }
+    $lines = ($bad | ForEach-Object { "•  $($_.Data.Mod.Name)  +  $(($_.Data.Other | ForEach-Object { $_.Name }) -join ', ')" }) -join "`n"
+    $r = [Windows.Forms.MessageBox]::Show($form, "These mods change the same screen files, and together the game screen will look broken (for example overlapping text on hero tags):`n`n$lines`n`nTurn one of them off.`n`nSave anyway?", 'Deadlock Mods', 'YesNo', 'Warning', 'Button2')
+    return ($r -eq 'Yes')
 }
 
 # Põhjalik kontroll ühele modi failile (vanad jagatud failid + kaamera)
@@ -385,7 +445,7 @@ function Show-ModCheck($pick = 'all') {
         [void]$row.SubItems.Add($x.Text)
         [void]$row.SubItems.Add($(if ($x.Fix) { $x.FixText } else { "(manual) $($x.FixText)" }))
         $row.ToolTipText = "$($x.Text)`n`nFix: $($x.FixText)"
-        $row.ForeColor = switch ($lvl) { 'Error' { [DlUi.G]::Hex('#8E2A20') } 'Warning' { [DlUi.G]::Hex('#6E4A08') } default { [DlUi.G]::Text } }
+        $row.ForeColor = switch ($lvl) { 'Error' { [DlUi.G]::Fg('#8E2A20') } 'Warning' { [DlUi.G]::Fg('#6E4A08') } default { [DlUi.G]::Text } }
         $row.Tag = $x
         if ($x.Fix -and $lvl -eq 'Error' -and -not $x.NoAuto) { $row.Checked = $true }   # hoiatused valib kasutaja ise
         [void]$lv.Items.Add($row)
@@ -442,7 +502,7 @@ function Show-ModCheck($pick = 'all') {
             $sub.Text = "Fixing: $($row.SubItems[1].Text) - $($x.Text)"; [Windows.Forms.Application]::DoEvents()
             try {
                 Invoke-CheckFix $x
-                $row.Checked = $false; $x.Done = $true; $row.Text = '✓ Fixed'; $row.ForeColor = [DlUi.G]::Hex('#3E7A26'); $ok++
+                $row.Checked = $false; $x.Done = $true; $row.Text = '✓ Fixed'; $row.ForeColor = [DlUi.G]::Fg('#3E7A26'); $ok++
                 $st.Changed = $true
             } catch {
                 $row.Text = '✕ Failed'; $row.SubItems[3].Text = $_.Exception.Message; $row.ToolTipText = $_.Exception.Message; $bad++

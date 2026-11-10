@@ -7,6 +7,7 @@
 
 $PicAspect = 72.0 / 98.0          # kaardi pildi kuju (Card.PicRect)
 $PicW = 432; $PicH = 588          # 2x, et suumitud kaardil ka terav oleks
+$PicFilter = 'Pictures (*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp)|*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp|All files|*.*'
 
 function Set-ModPicture($id, [Drawing.Image]$img) {
     if (-not (Test-Path -LiteralPath $ModPicDir)) { New-Item -ItemType Directory -Force $ModPicDir | Out-Null }
@@ -17,6 +18,29 @@ function Set-ModPicture($id, [Drawing.Image]$img) {
     $tmp = Join-Path $ModPicDir "$id.tmp.png"
     $bmp.Save($tmp, [Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose()
     Move-Item -LiteralPath $tmp -Destination (Join-Path $ModPicDir "$id.png") -Force
+    $ModPicCache.Remove($id)
+}
+
+# Originaalpilt ja kärpe koht kaardi pildi kõrval: pildiaknas saab pilti hiljem uuesti liigutada / suumida
+# (kaardi pilt ise on juba kärbitud - selles pole ruumi liigutada)
+function Save-PictureOrig($id, [Drawing.Image]$img, [double]$cx, [double]$cy, [double]$zoom) {
+    if (-not (Test-Path -LiteralPath $ModPicDir)) { New-Item -ItemType Directory -Force $ModPicDir | Out-Null }
+    $small = Get-SmallCopy $img 1600
+    try { $small.Save((Join-Path $ModPicDir "$id.orig.png"), [Drawing.Imaging.ImageFormat]::Png) } finally { $small.Dispose() }
+    $j = ConvertTo-Json @{ Cx = $cx; Cy = $cy; Zoom = $zoom }
+    [IO.File]::WriteAllText((Join-Path $ModPicDir "$id.crop.json"), $j, (New-Object Text.UTF8Encoding $false))
+}
+function Get-PictureOrig($id) {
+    $o = Join-Path $ModPicDir "$id.orig.png"; $c = Join-Path $ModPicDir "$id.crop.json"
+    if (-not (Test-Path -LiteralPath $o)) { return $null }
+    try {
+        $img = Read-ImageNoLock $o; $cr = @{ Cx = 0.5; Cy = 0.5; Zoom = 1.0 }
+        if (Test-Path -LiteralPath $c) { $j = [IO.File]::ReadAllText($c) | ConvertFrom-Json; $cr = @{ Cx = [double]$j.Cx; Cy = [double]$j.Cy; Zoom = [double]$j.Zoom } }
+        return @{ Img = $img; Cx = $cr.Cx; Cy = $cr.Cy; Zoom = [Math]::Max(1.0, $cr.Zoom) }
+    } catch { return $null }
+}
+function Remove-PictureFiles($id) {
+    foreach ($n in "$id.png", "$id.orig.png", "$id.crop.json") { $f = Join-Path $ModPicDir $n; if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force } }
     $ModPicCache.Remove($id)
 }
 
@@ -67,7 +91,7 @@ function Get-ClipboardPicture {
 # Millist GameBanana pilti kasutada: allkirjas modi/kangelase nimi (+), ikoonid/UI/võrdlus (-), püstisem pilt (+), esimesed (+)
 function Get-BestGbImage($id, $inf) {
     $m = $ById[$id]
-    $mine = @(Get-NameTokens "$($m.Name) $(Get-HeroName $m)")
+    $mine = Get-NameTokens "$($m.Name) $(Get-HeroName $m)"   # (ilma @(): muidu massiiv massiivis ja -contains ei leia midagi)
     $best = $null; $bs = -99; $i = 0
     foreach ($im in @($inf.Images)) {
         $cap = ([string]$im.Caption).ToLower(); $s = 0
@@ -90,6 +114,7 @@ function Save-ModPictureFromGb($id, $inf) {
         $c = [DlUi.AutoCrop]::Find($img, $PicAspect, 1.0)
         $bmp = Get-CroppedPicture $img $c.X $c.Y 1.0
         try { Set-ModPicture $id $bmp } finally { $bmp.Dispose() }
+        Save-PictureOrig $id $img $c.X $c.Y 1.0
     } finally { $img.Dispose() }
 }
 
@@ -117,7 +142,7 @@ function Show-PictureSmall($id) {
     $m = $ById[$id]
     $d = New-Object Windows.Forms.Form
     $d.Text = "Picture: $($m.Name)"; $d.BackColor = $DlgBg; $d.ForeColor = $DlgText; $d.Font = $FontUi
-    $d.FormBorderStyle = 'FixedDialog'; $d.MaximizeBox = $false; $d.MinimizeBox = $false; $d.StartPosition = 'CenterParent'
+    $d.FormBorderStyle = 'FixedDialog'; $d.MaximizeBox = $false; Enable-DialogMinimize $d; $d.StartPosition = 'CenterParent'
     $d.ClientSize = New-Object Drawing.Size(460, 220)
     $d.Add_HandleCreated({ $v = 1; [void][DlToggle.Native]::DwmSetWindowAttribute($this.Handle, 20, [ref]$v, 4) })
     $hdr = New-DialogHeader $d 'Mod picture' "Where should the picture for $(Get-ShortName $m) come from?"
@@ -128,9 +153,8 @@ function Show-PictureSmall($id) {
     $msg = New-Object Windows.Forms.Label; $msg.AutoSize = $true; $msg.ForeColor = $DlgText; $msg.Location = New-Object Drawing.Point(20, 176)
     $msg.Text = 'Tip: in the browser right-click a picture -> Copy image, then Paste.'
     $b1.Add_Click({
-        $dlg = New-Object Windows.Forms.OpenFileDialog
-        $dlg.Filter = 'Pictures (*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp)|*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp|All files|*.*'
-        if ($dlg.ShowDialog($d) -eq 'OK') { try { $st.Res = Read-ImageNoLock $dlg.FileName; $d.Close() } catch { $msg.Text = 'That file is not a picture Windows can open.' } }
+        $fs = [DlUi.FreePicker]::Open('Choose a picture', $PicFilter, '', $false)
+        if ($fs -and $fs.Count) { try { $st.Res = Read-ImageNoLock $fs[0]; $d.Close() } catch { $msg.Text = 'That file is not a picture Windows can open.' } }
     })
     $b2.Add_Click({ $d.Cursor = 'WaitCursor'; try { $st.Res = Get-ClipboardPicture } catch {} finally { $d.Cursor = 'Default' }; if ($st.Res) { $d.Close() } else { $msg.Text = 'Nothing to paste: copy a picture first (right-click it -> Copy image).' } })
     $b3.Add_Click({ $st.Res = 'link'; $d.Close() })
@@ -156,6 +180,10 @@ function Show-PictureFor($id, $row = $null) {
     Show-PictureEditor $id $row $img
 }
 
+# Peidetud pildiga modid (PlainPicTabs, vaikimisi tühi):
+# pildiaken ei näita praegust pilti ega GameBanana lehe pilte
+function Test-PicHidden($id) { Test-OtherPicHidden $id }   # (DeadlockModToggle.ps1)
+
 # ---------- Aken: pildi valik ja koht ----------
 function Show-PictureEditor($id, $row, $startImg = $null) {
     if (-not $row) { $m0 = $ById[$id]; $row = @($(if ($m0.Parent -and $ById[$m0.Parent]) { $m0.Parent } else { $id })) }
@@ -164,7 +192,7 @@ function Show-PictureEditor($id, $row, $startImg = $null) {
     $st = @{ Id = $id; Img = $null; View = $null; Cx = 0.5; Cy = 0.4; Zoom = 1.0; Drag = $null; Gb = $null; GbKey = '-'; Thumbs = @(); Changed = $false; Saved = @() }
     $d = New-Object Windows.Forms.Form
     $d.Text = 'Mod picture'; $d.BackColor = $DlgBg; $d.ForeColor = $DlgText; $d.Font = $FontUi
-    $d.FormBorderStyle = 'Sizable'; $d.MinimizeBox = $false; $d.StartPosition = 'CenterParent'
+    $d.FormBorderStyle = 'Sizable'; Enable-DialogMinimize $d; $d.StartPosition = 'CenterParent'
     $d.ClientSize = New-Object Drawing.Size(920, 600); $d.MinimumSize = New-Object Drawing.Size(780, 560)
     $d.Add_HandleCreated({ $v = 1; [void][DlToggle.Native]::DwmSetWindowAttribute($this.Handle, 20, [ref]$v, 4) })
     $hdr = New-DialogHeader $d 'Mod picture' 'Pick a picture, then drag it in the frame (mouse wheel = zoom). An alt''s picture shows while that alt is on.'
@@ -172,9 +200,9 @@ function Show-PictureEditor($id, $row, $startImg = $null) {
     $forLab = New-Object Windows.Forms.Label; $forLab.AutoSize = $true; $forLab.ForeColor = $DlgText; $forLab.Location = New-Object Drawing.Point(16, 78); $forLab.Text = 'Picture for:'
     $forBox = New-Object Windows.Forms.ComboBox
     $forBox.DropDownStyle = 'DropDownList'; $forBox.FlatStyle = 'Flat'; $forBox.BackColor = $G::Raised; $forBox.ForeColor = $G::Bright; $forBox.Width = 420
-    $forBox.Add_HandleCreated({ [void][DlToggle.Native]::SetWindowTheme($this.Handle, $(if ($Deco) { 'Explorer' } else { 'DarkMode_CFD' }), $null) })
+    $forBox.Add_HandleCreated({ [void][DlToggle.Native]::SetWindowTheme($this.Handle, $(if ($Deco -and -not $Night) { 'Explorer' } else { 'DarkMode_CFD' }), $null) })
     $forBox.Location = New-Object Drawing.Point(100, 74)
-    foreach ($t in $targets) { [void]$forBox.Items.Add($t.Text + $(if (Get-ModPicture $t.Id) { '   ✓' } else { '' })) }
+    foreach ($t in $targets) { [void]$forBox.Items.Add($t.Text + $(if ((Get-ModPicture $t.Id) -and -not (Test-PicHidden $t.Id)) { '   ✓' } else { '' })) }
 
     $lab = New-Object Windows.Forms.Label; $lab.AutoSize = $true; $lab.ForeColor = $DlgText; $lab.Location = New-Object Drawing.Point(16, 110)
     $thumbs = New-Object Windows.Forms.FlowLayoutPanel
@@ -192,7 +220,7 @@ function Show-PictureEditor($id, $row, $startImg = $null) {
     $pvLab.Location = New-Object Drawing.Point(626, 484); $pvLab.Text = 'Drag = move,  mouse wheel = zoom'
     $pv.Add_Paint({
         $gx = $_.Graphics
-        if (-not $st.View) { [Windows.Forms.TextRenderer]::DrawText($gx, 'No picture yet', $FontUi, $pv.ClientRectangle, $G::Text, [Windows.Forms.TextFormatFlags]'HorizontalCenter, VerticalCenter'); return }
+        if (-not $st.View) { [Windows.Forms.TextRenderer]::DrawText($gx, $(if ($st.Hidden) { 'Hidden' } else { 'No picture yet' }), $FontUi, $pv.ClientRectangle, $G::Text, [Windows.Forms.TextFormatFlags]'HorizontalCenter, VerticalCenter'); return }
         $bmp = Get-CroppedPicture $st.View $st.Cx $st.Cy $st.Zoom $pv.Width $pv.Height
         $gx.DrawImageUnscaled($bmp, 0, 0); $bmp.Dispose()
     })
@@ -230,7 +258,11 @@ function Show-PictureEditor($id, $row, $startImg = $null) {
     }
     $saveCur = {
         # muudatus salvestatakse enne teise sihi valimist ja OK-ga
-        if ($st.Changed -and $st.Img) { $bmp = Get-CroppedPicture $st.Img $st.Cx $st.Cy $st.Zoom; try { Set-ModPicture $st.Id $bmp } finally { $bmp.Dispose() }; $st.Saved += $st.Id }
+        if ($st.Changed -and $st.Img) {
+            $bmp = Get-CroppedPicture $st.Img $st.Cx $st.Cy $st.Zoom; try { Set-ModPicture $st.Id $bmp } finally { $bmp.Dispose() }
+            Save-PictureOrig $st.Id $st.Img $st.Cx $st.Cy $st.Zoom
+            $st.Saved += $st.Id
+        }
         $st.Changed = $false
     }
     $loadGallery = {
@@ -261,9 +293,24 @@ function Show-PictureEditor($id, $row, $startImg = $null) {
     $loadTarget = {
         $cur = Get-ModPicture $st.Id
         if ($st.Img) { $st.Img.Dispose(); $st.Img = $null }; if ($st.View) { $st.View.Dispose(); $st.View = $null }
-        if ($cur) { $st.Img = New-Object Drawing.Bitmap $cur; $st.View = Get-SmallCopy $st.Img; $st.Cx = 0.5; $st.Cy = 0.5; $st.Zoom = 1.0 }
+        $st.Hidden = Test-PicHidden $st.Id; $bAuto.Enabled = -not $st.Hidden
+        if ($st.Hidden) {
+            # peidus: ei praegust pilti ega GameBanana galeriid (fail / kleebi / eemalda töötavad)
+            foreach ($t in $st.Thumbs) { foreach ($c in $t.Controls) { if ($c.Image) { $c.Image.Dispose() } } }
+            $thumbs.Controls.Clear(); $st.Thumbs = @(); $st.Gb = $null; $st.GbKey = '-'
+            $lab.Text = 'Pictures are hidden here. Use "Choose file…" or "Paste copied picture".'
+            $st.Changed = $false; $bDel.Enabled = [bool]$cur; $pv.Invalidate(); return
+        }
+        $orig = if ($cur) { Get-PictureOrig $st.Id } else { $null }
+        if ($orig) { $st.Img = $orig.Img; $st.View = Get-SmallCopy $st.Img; $st.Cx = $orig.Cx; $st.Cy = $orig.Cy; $st.Zoom = $orig.Zoom; & $clamp }
+        elseif ($cur) { $st.Img = New-Object Drawing.Bitmap $cur; $st.View = Get-SmallCopy $st.Img; $st.Cx = 0.5; $st.Cy = 0.5; $st.Zoom = 1.0 }
         $st.Changed = $false; $bDel.Enabled = [bool]$cur; $pv.Invalidate()
         & $loadGallery
+        if ($cur -and -not $orig -and $st.Gb) {
+            # vanem pilt (ilma originaalita): laadi GameBanana pilt, millest see tehti, et saaks liigutada
+            $best = Get-BestGbImage $st.Id $st.Gb
+            if ($best) { & $pickGb $best; $st.Changed = $false }
+        }
     }
     $forBox.Add_SelectedIndexChanged({
         $nid = $targets[$forBox.SelectedIndex].Id
@@ -272,13 +319,13 @@ function Show-PictureEditor($id, $row, $startImg = $null) {
         $st.Id = $nid; $st.Loaded = $true; & $loadTarget
     })
     $bAuto.Add_Click({
+        if ($st.Hidden) { return }
         if ($st.Gb) { $best = Get-BestGbImage $st.Id $st.Gb; if ($best) { & $pickGb $best; return } }
         if ($st.Img) { $c = [DlUi.AutoCrop]::Find($st.Img, $PicAspect, 1.0); $st.Zoom = 1.0; $st.Cx = $c.X; $st.Cy = $c.Y; & $clamp; $st.Changed = $true; $pv.Invalidate() }
     })
     $bFile.Add_Click({
-        $dlg = New-Object Windows.Forms.OpenFileDialog
-        $dlg.Filter = 'Pictures (*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp)|*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp|All files|*.*'
-        if ($dlg.ShowDialog($d) -eq 'OK') { try { & $setImg (Read-ImageNoLock $dlg.FileName) $true } catch { $lab.Text = 'That file is not a picture Windows can open.' } }
+        $fs = [DlUi.FreePicker]::Open('Choose a picture', $PicFilter, '', $false)
+        if ($fs -and $fs.Count) { try { & $setImg (Read-ImageNoLock $fs[0]) $true } catch { $lab.Text = 'That file is not a picture Windows can open.' } }
     })
     $bPaste.Add_Click({
         $d.Cursor = 'WaitCursor'
@@ -286,8 +333,7 @@ function Show-PictureEditor($id, $row, $startImg = $null) {
         catch { $lab.Text = "Could not paste: $_" } finally { $d.Cursor = 'Default' }
     })
     $bDel.Add_Click({
-        $p = Join-Path $ModPicDir "$($st.Id).png"; $ModPicCache.Remove($st.Id)
-        if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force }
+        Remove-PictureFiles $st.Id
         $st.Saved += $st.Id; & $loadTarget
     })
     $ok = New-Pill 'Save picture' $true; $ok.FitWidth(22, 34); $ok.Anchor = 'Bottom, Right'

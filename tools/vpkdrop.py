@@ -1,5 +1,7 @@
 """python -I vpkdrop.py <in.vpk> <out.vpk> <path_to_drop | @listfile>...
-Rewrites a single-file VPK v2 tree without the given entries; file data is copied unchanged."""
+Rewrites a single-file VPK without the given entries. The kept files' bytes are copied unchanged; the dropped
+files' data is left out too (before 2026-11-08 only the tree was rewritten and the data stayed, so the file did
+not get smaller). With no paths it just compacts a VPK (removes data nothing points to)."""
 import struct, sys
 
 src, dst = sys.argv[1], sys.argv[2]
@@ -20,6 +22,7 @@ else:
     hdr_size = 12
     data_size = len(data) - hdr_size - tree_size  # v1: file data runs to the end
     print(f"header: v1 tree={tree_size} data={data_size}")
+data0 = hdr_size + tree_size
 pos = hdr_size
 
 def cstr():
@@ -29,39 +32,37 @@ def cstr():
     pos = end + 1
     return s
 
-tree = {}  # ext -> dir -> [(name, entry bytes)]
+tree = {}  # ext -> dir -> [(name, crc, preload bytes, file bytes)]
 dropped = []
 while (ext := cstr()):
     while (d := cstr()):
         while (n := cstr()):
-            pre = struct.unpack_from("<H", data, pos + 4)[0]
-            entry = data[pos:pos + 18 + pre]
-            assert struct.unpack_from("<H", data, pos + 6)[0] == 0x7FFF, "multi-archive vpk not supported"
+            crc, pre, arch, off, ln, term = struct.unpack_from("<IHHIIH", data, pos)
+            assert arch == 0x7FFF, "multi-archive vpk not supported"
+            preload = data[pos + 18:pos + 18 + pre]
             pos += 18 + pre
             full = ((d.decode() + "/") if d.strip() else "") + n.decode() + "." + ext.decode()
             if full.lower() in drop:
                 dropped.append(full)
                 continue
-            tree.setdefault(ext, {}).setdefault(d, []).append((n, entry))
+            tree.setdefault(ext, {}).setdefault(d, []).append((n, crc, preload, data[data0 + off:data0 + off + ln]))
 assert pos == hdr_size + tree_size
 assert len(dropped) == len(drop), f"not found: {drop - {x.lower() for x in dropped}}"
 
-out = bytearray()
+out = bytearray(); blob = bytearray()
 for ext, dirs in tree.items():
     out += ext + b"\0"
     for d, files in dirs.items():
         out += d + b"\0"
-        for n, entry in files:
-            out += n + b"\0" + entry
+        for n, crc, preload, body in files:
+            out += n + b"\0" + struct.pack("<IHHIIH", crc, len(preload), 0x7FFF, len(blob), len(body), 0xFFFF) + preload
+            blob += body
         out += b"\0"
     out += b"\0"
 out += b"\0"
 
-blob = data[hdr_size + tree_size: hdr_size + tree_size + data_size]
-# MD5 / signature sections would no longer match the new tree, so leave them out.
-if ver == 2:
-    hdr = struct.pack("<7I", sig, ver, len(out), data_size, 0, 0, 0)
-else:
-    hdr = struct.pack("<3I", sig, ver, len(out))
-open(dst, "wb").write(hdr + bytes(out) + blob)
+# MD5 / signature sections would no longer match the new tree, so leave them out (v2 output always).
+hdr = struct.pack("<7I", sig, 2, len(out), len(blob), 0, 0, 0)
+open(dst, "wb").write(hdr + bytes(out) + bytes(blob))
+print(f"kept data: {len(blob)} of {data_size} bytes")
 print("dropped:", *dropped, sep="\n  ")

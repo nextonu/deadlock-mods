@@ -247,7 +247,7 @@ function Move-ParentUp($parentId, [int]$count) {
 function Show-AddDialog($defaultName, $hero, $log) {
     $d = New-Object Windows.Forms.Form
     $d.Text = 'Add mod'; $d.BackColor = $DlgBg; $d.ForeColor = $DlgText; $d.Font = $FontUi
-    $d.FormBorderStyle = 'FixedDialog'; $d.MaximizeBox = $false; $d.MinimizeBox = $false
+    $d.FormBorderStyle = 'FixedDialog'; $d.MaximizeBox = $false; Enable-DialogMinimize $d
     $d.StartPosition = 'CenterParent'; $d.ClientSize = New-Object Drawing.Size(520, 560)
     $d.Add_HandleCreated({ $v = 1; [void][DlToggle.Native]::DwmSetWindowAttribute($this.Handle, 20, [ref]$v, 4) })
     $y = 18
@@ -263,7 +263,7 @@ function Show-AddDialog($defaultName, $hero, $log) {
     $name.Location = New-Object Drawing.Point(20, $script:dy); $name.Width = 480; $d.Controls.Add($name); $script:dy += 40
     & $mk 'Hero (only one skin per hero can be on)'
     $heroBox = New-Object Windows.Forms.ComboBox
-    $heroBox.DropDownStyle = 'DropDownList'; $heroBox.Add_HandleCreated({ [void][DlToggle.Native]::SetWindowTheme($this.Handle, $(if ($Deco) { 'Explorer' } else { 'DarkMode_CFD' }), $null) }); $heroBox.BackColor = $G::Raised; $heroBox.ForeColor = $G::Bright; $heroBox.FlatStyle = 'Flat'
+    $heroBox.DropDownStyle = 'DropDownList'; $heroBox.Add_HandleCreated({ [void][DlToggle.Native]::SetWindowTheme($this.Handle, $(if ($Deco -and -not $Night) { 'Explorer' } else { 'DarkMode_CFD' }), $null) }); $heroBox.BackColor = $G::Raised; $heroBox.ForeColor = $G::Bright; $heroBox.FlatStyle = 'Flat'
     $heroBox.Location = New-Object Drawing.Point(20, $script:dy); $heroBox.Width = 240
     $names = @('— not a hero skin —') + @($HeroTable.Values | ForEach-Object { ($_ -split '\|')[0] } | Sort-Object -Unique)
     [void]$heroBox.Items.AddRange($names)
@@ -271,14 +271,14 @@ function Show-AddDialog($defaultName, $hero, $log) {
     $d.Controls.Add($heroBox); $script:dy += 40
     & $mk 'Category'
     $cat = New-Object Windows.Forms.ComboBox
-    $cat.DropDownStyle = 'DropDownList'; $cat.Add_HandleCreated({ [void][DlToggle.Native]::SetWindowTheme($this.Handle, $(if ($Deco) { 'Explorer' } else { 'DarkMode_CFD' }), $null) }); $cat.BackColor = $G::Raised; $cat.ForeColor = $G::Bright; $cat.FlatStyle = 'Flat'
+    $cat.DropDownStyle = 'DropDownList'; $cat.Add_HandleCreated({ [void][DlToggle.Native]::SetWindowTheme($this.Handle, $(if ($Deco -and -not $Night) { 'Explorer' } else { 'DarkMode_CFD' }), $null) }); $cat.BackColor = $G::Raised; $cat.ForeColor = $G::Bright; $cat.FlatStyle = 'Flat'
     $cat.Location = New-Object Drawing.Point(20, $script:dy); $cat.Width = 240
     [void]$cat.Items.AddRange(@('Skins', 'Map', 'Visuals', 'Sounds & music', 'Utility (recommended)'))
     $cat.SelectedIndex = if ($hero) { 0 } else { 2 }
     $d.Controls.Add($cat); $script:dy += 40
     & $mk 'Alt for an existing mod (overrides its files when on)'
     $par = New-Object Windows.Forms.ComboBox
-    $par.DropDownStyle = 'DropDownList'; $par.Add_HandleCreated({ [void][DlToggle.Native]::SetWindowTheme($this.Handle, $(if ($Deco) { 'Explorer' } else { 'DarkMode_CFD' }), $null) }); $par.BackColor = $G::Raised; $par.ForeColor = $G::Bright; $par.FlatStyle = 'Flat'
+    $par.DropDownStyle = 'DropDownList'; $par.Add_HandleCreated({ [void][DlToggle.Native]::SetWindowTheme($this.Handle, $(if ($Deco -and -not $Night) { 'Explorer' } else { 'DarkMode_CFD' }), $null) }); $par.BackColor = $G::Raised; $par.ForeColor = $G::Bright; $par.FlatStyle = 'Flat'
     $par.Location = New-Object Drawing.Point(20, $script:dy); $par.Width = 480; $par.MaxDropDownItems = 20
     # sama kangelase modid ettepoole
     $cands = @($Mods | Where-Object { -not $_.Parent } | Sort-Object @{ e = { if ($hero -and $_.Hero -eq $hero.Key) { 0 } else { 1 } } }, @{ e = { $_.Name } })
@@ -297,14 +297,14 @@ function Show-AddDialog($defaultName, $hero, $log) {
     $styleLabel.Location = New-Object Drawing.Point(20, $script:dy); $styleLabel.Visible = $false; $d.Controls.Add($styleLabel)
     $script:dy += 24
     $dest = New-Object Windows.Forms.ComboBox
-    $dest.DropDownStyle = 'DropDownList'; $dest.Add_HandleCreated({ [void][DlToggle.Native]::SetWindowTheme($this.Handle, $(if ($Deco) { 'Explorer' } else { 'DarkMode_CFD' }), $null) }); $dest.BackColor = $G::Raised; $dest.ForeColor = $G::Bright; $dest.FlatStyle = 'Flat'
+    $dest.DropDownStyle = 'DropDownList'; $dest.Add_HandleCreated({ [void][DlToggle.Native]::SetWindowTheme($this.Handle, $(if ($Deco -and -not $Night) { 'Explorer' } else { 'DarkMode_CFD' }), $null) }); $dest.BackColor = $G::Raised; $dest.ForeColor = $G::Bright; $dest.FlatStyle = 'Flat'
     $dest.Location = New-Object Drawing.Point(20, $script:dy); $dest.Width = 240
     $destKeys = if ($Portable) { @('New') + @($CustomTabs.Keys | ForEach-Object { "tab:$_" }) } else { @('New', 'Other', 'These') }
     [void]$dest.Items.AddRange(@($destKeys | ForEach-Object { if ($_ -eq 'New') { if ($Portable) { 'All mods only' } else { 'New (choose later)' } } elseif ($_ -like 'tab:*') { 'All mods + tab: ' + $_.Substring(4) } else { $_ } }))
     $dest.SelectedIndex = 0
     $d.Controls.Add($dest)
     $style = New-Object Windows.Forms.ComboBox
-    $style.DropDownStyle = 'DropDownList'; $style.Add_HandleCreated({ [void][DlToggle.Native]::SetWindowTheme($this.Handle, $(if ($Deco) { 'Explorer' } else { 'DarkMode_CFD' }), $null) }); $style.BackColor = $G::Raised; $style.ForeColor = $G::Bright; $style.FlatStyle = 'Flat'
+    $style.DropDownStyle = 'DropDownList'; $style.Add_HandleCreated({ [void][DlToggle.Native]::SetWindowTheme($this.Handle, $(if ($Deco -and -not $Night) { 'Explorer' } else { 'DarkMode_CFD' }), $null) }); $style.BackColor = $G::Raised; $style.ForeColor = $G::Bright; $style.FlatStyle = 'Flat'
     $style.Location = New-Object Drawing.Point(20, $script:dy); $style.Width = 480
     [void]$style.Items.AddRange(@('Small "+ alt" button next to the mod', 'Only a small "n" in the mod button corner (click: on/off)'))
     $style.SelectedIndex = 0; $style.Visible = $false
@@ -530,12 +530,11 @@ function Add-ModFiles($files) {
 }
 
 function Start-AddMod {
-    $dlg = New-Object Windows.Forms.OpenFileDialog
-    $dlg.Title = 'Choose mod archives or .vpk files (you can pick several)'
-    $dlg.Filter = 'Mods (zip, rar, 7z, tar.gz, vpk…)|*.zip;*.rar;*.7z;*.vpk;*.tar;*.gz;*.tgz;*.xz;*.txz;*.bz2;*.tbz2;*.tbz|All files|*.*'
-    $dlg.InitialDirectory = $(if (Test-Path 'D:\Downloads') { 'D:\Downloads' } else { Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads' })
-    $dlg.Multiselect = $true
-    if ($dlg.ShowDialog($form) -eq 'OK') { Add-ModFiles $dlg.FileNames }
+    # failivalija ei lukusta rakendust (oma aken: saab liigutada, minimeerida, kõrvale jätta) - ui.cs FreePicker
+    if ([DlUi.FreePicker]::Busy) { return }
+    $dir = $(if (Test-Path 'D:\Downloads') { 'D:\Downloads' } else { Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads' })
+    $files = [DlUi.FreePicker]::Open('Choose mod archives or .vpk files (you can pick several)', 'Mods (zip, rar, 7z, tar.gz, vpk…)|*.zip;*.rar;*.7z;*.vpk;*.tar;*.gz;*.tgz;*.xz;*.txz;*.bz2;*.tbz2;*.tbz|All files|*.*', $dir, $true)
+    if ($files -and $files.Count -and -not $script:AddBusy) { Add-ModFiles $files }
 }
 
 # Nupp päisesse (otsingukasti kõrvale) ja lohistamine aknale

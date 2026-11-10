@@ -40,17 +40,35 @@ namespace DlUi
         public static Color PageBg = Hex("#181818"), HeadText = Hex("#CCCCCC"), HeadBright = Hex("#FFFFFF"), HeadMuted = Hex("#9D9D9D");
         // Vahelehtede riba ja tumedad ("Quick Buy") nupud
         public static Color TabBg = Hex("#181818"), TabSel = Hex("#FFFFFF"), TabIdle = Hex("#9D9D9D"), TabHover = Hex("#CCCCCC"),
-            TabLine = Hex("#EAB308"), TabEdge = Hex("#2B2B2B"),
+            TabLine = Hex("#EAB308"), TabEdge = Hex("#2B2B2B"), TabNew = Hex("#EAB308"),
             DarkFill = Hex("#252526"), DarkHover = Hex("#303033"), DarkLine = Hex("#3C3C3C"),
             SearchFill = Hex("#252526"), SearchText = Hex("#FFFFFF");
 
         // --- Teemad: "deadlock" (vaikimisi, poe stiil) ja "ajukas" (eelmine must-kollane) ---
+        // "dark" = sama poe stiil, aga tume (öine pärgament, tumedad kaardid, hele kiri)
         public static string Theme = "ajukas";
-        public static bool Deco { get { return Theme == "deadlock"; } }
+        public static bool Deco { get { return Theme != "ajukas"; } }
+        public static bool Night { get { return Theme == "dark"; } }
+
+        // Heledal paberil loetav tume tekstivärv (punane/roheline/pruun rida) -> tumedas teemas sama tooni hele variant
+        public static Color Fg(string hex)
+        {
+            Color c = Hex(hex);
+            if (!Night) return c;
+            float h = c.GetHue(), s = Math.Min(1f, c.GetSaturation() * 0.85f), l = 0.70f;
+            float q = l < 0.5f ? l * (1 + s) : l + s - l * s, p = 2 * l - q;
+            Func<float, int> ch = tt =>
+            {
+                if (tt < 0) tt += 1; if (tt > 1) tt -= 1;
+                float v = tt < 1f / 6 ? p + (q - p) * 6 * tt : tt < 0.5f ? q : tt < 2f / 3 ? p + (q - p) * (2f / 3 - tt) * 6 : p;
+                return (int)Math.Round(Math.Max(0, Math.Min(1, v)) * 255);
+            };
+            return Color.FromArgb(ch(h / 360 + 1f / 3), ch(h / 360), ch(h / 360 - 1f / 3));
+        }
 
         public static void Apply(string theme)
         {
-            Theme = theme == "ajukas" ? "ajukas" : "deadlock";
+            Theme = theme == "ajukas" ? "ajukas" : theme == "dark" ? "dark" : "deadlock";
             if (!Deco) return;
             // Nagu mängu pood: tume raam (päis, ribad), kulunud paberleht, kreemikad esemekaardid tumeda tekstiga
             Bg = Hex("#16161A"); PageBg = Hex("#B8AA8E");
@@ -61,11 +79,20 @@ namespace DlUi
             Brand = Hex("#E2B456"); BrandHover = Hex("#F0C46A"); OnFill = Hex("#E9C77A"); OnHover = Hex("#F0D08A");
             OnLine = Hex("#B98A2A"); Ink = Hex("#15100A");
             // poe ülemine kategooriariba: tumedam pärgament, tume kiri
-            TabBg = Hex("#A3957A"); TabSel = Hex("#14110D"); TabIdle = Hex("#5B5043"); TabHover = Hex("#2E2822");
+            TabBg = Hex("#B5A78B"); TabSel = Hex("#14110D"); TabIdle = Hex("#3A3128"); TabHover = Hex("#14110D"); TabNew = Hex("#6E3008");   // (oli #5B5043 #A3957A-l: liiga hele)
             TabLine = Hex("#C0661F"); TabEdge = Hex("#8E8169");
             // "Quick Buy" kastid: tumepruun, kuldne äär
             DarkFill = Hex("#3A332C"); DarkHover = Hex("#4A4138"); DarkLine = Hex("#7A6440");
             SearchFill = Hex("#2A2520"); SearchText = Hex("#E6DECF");
+            if (!Night) return;
+            // Tume poe stiil: söemust-pruun leht, tumedad esemekaardid, kreemjas kiri, samad kategooriavärvid
+            Bg = Hex("#121014"); PageBg = Hex("#211D18");
+            Panel = Hex("#2F2922"); PanelHover = Hex("#3A3229"); Raised = Hex("#28231D"); Hover = Hex("#433A2F");
+            Line = Hex("#4A4033"); Line2 = Hex("#5A4D3C"); LineHover = Hex("#8C7756");
+            Text = Hex("#DDD3C1"); Bright = Hex("#FFF6E6"); Muted = Hex("#ADA08A");
+            OnFill = Hex("#6A5326"); OnHover = Hex("#7A612D");
+            TabBg = Hex("#1A1714"); TabSel = Hex("#FFF6E6"); TabIdle = Hex("#A3967F"); TabHover = Hex("#DDD3C1");
+            TabLine = Hex("#E07A2B"); TabEdge = Hex("#3A3229"); TabNew = Hex("#F08A3B");
         }
 
         // Poe kategooriate värvid: relv (oranž), vaim (lilla), elujõud (roheline), hinged (türkiis)
@@ -509,6 +536,7 @@ namespace DlUi
         public int Radius = 12;
         public float Lift;
         int applied;                     // mitu pikslit lapsi on üles nihutatud
+        int bob;                         // valikurežiimi hüpe (pildi nihe üles, px)
 
         public static Card DebugHover;   // testimiseks: teeskle, et hiir on selle kaardi peal
         static Timer timer;
@@ -557,6 +585,12 @@ namespace DlUi
                     Rectangle r = k.RectangleToScreen(new Rectangle(Inset, Inset, k.Width - 2 * Inset, k.Height - 2 * Inset));
                     Rectangle view = k.Parent.RectangleToScreen(k.Parent.ClientRectangle);
                     if (r.Contains(c) && view.Contains(c)) target = 1;
+                }
+                // valikurežiimis (Delete / Check / Updates ...) hiire all oleva kaardi kangelane hüpleb üles-alla
+                int bob = (Chip.DeleteMode && target > 0.5f && k.Lift > 0.5f && k.Picture != null) ? Chip.BobPx(4) : 0;
+                if (bob != k.bob)
+                {
+                    var pr = k.PicRect; pr.Inflate(2, 7); k.bob = bob; k.Invalidate(pr, false);
                 }
                 if (Math.Abs(k.Lift - target) < 0.001f) continue;
                 k.Lift += (target - k.Lift) * 0.28f;
@@ -658,7 +692,7 @@ namespace DlUi
 
             if (Picture != null)
             {
-                RectangleF pr = PicRect; pr.Offset(0, -applied);
+                RectangleF pr = PicRect; pr.Offset(0, -applied - bob);
                 using (var clip = G.Round(pr, 9))
                 {
                     var state = g.Save();
@@ -898,6 +932,7 @@ namespace DlUi
                      ControlStyles.ResizeRedraw | ControlStyles.SupportsTransparentBackColor, true);
             BackColor = Color.Transparent;
             Cursor = Cursors.Hand;
+            if (bobTimer == null) { bobTimer = new Timer(); bobTimer.Interval = 30; bobTimer.Tick += BobTick; bobTimer.Start(); }
         }
 
         public bool Checked
@@ -951,8 +986,18 @@ namespace DlUi
         }
         public bool IsOnBadge(Point p) { return OnBadge(p); }   // paremklõps "n"-il: menüü on aldi jaoks
 
-        protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
-        protected override void OnMouseLeave(EventArgs e) { hover = false; hoverBadge = false; down = false; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnMouseEnter(EventArgs e) { hover = true; hot = this; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hover = false; hoverBadge = false; down = false; if (hot == this) hot = null; Invalidate(); base.OnMouseLeave(e); }
+
+        // Valikurežiimis hüpleb hiire all olev nupp üles-alla (nagu kaardi kangelane): 0..max px, ~1.5 korda sekundis
+        public static int BobPx(int max) { double t = Environment.TickCount / 1000.0; return (int)Math.Round((1 - Math.Cos(t * Math.PI * 2 * 1.5)) / 2 * max); }
+        static Chip hot; static Timer bobTimer; int bobShown;
+        static void BobTick(object s, EventArgs e)
+        {
+            var c = hot;
+            if (c == null || c.IsDisposed || !DeleteMode) { if (c != null && c.bobShown != 0) c.Invalidate(); return; }
+            if (BobPx(3) != c.bobShown) c.Invalidate();
+        }
         protected override void OnMouseMove(MouseEventArgs e)
         {
             bool b = OnBadge(e.Location);
@@ -1002,6 +1047,8 @@ namespace DlUi
             g.SmoothingMode = SmoothingMode.AntiAlias;
             RectangleF r = new RectangleF(0.5f, BadgeTop + 0.5f, Width - BadgeR - 1.5f, Height - BadgeTop - 1.5f);
             if (down) r.Inflate(-1.2f, -1.2f);
+            bobShown = (DeleteMode && hover && !down) ? BobPx(3) : 0;
+            if (bobShown != 0) g.TranslateTransform(0, -bobShown);
             Color fill = chk ? (hover ? G.OnHover : G.OnFill) : (hover ? G.Hover : G.Raised);
             Color line = chk ? G.Brand : (hover ? G.LineHover : G.Line2);
             Color textCol = chk || hover ? G.Bright : G.Text;
@@ -1048,6 +1095,31 @@ namespace DlUi
         }
     }
 
+    // Ümmargune "n" nupp (nagu modi nupu nurgas olev "n"): On = n-versioonid sees. Klõps = Click sündmus.
+    public class NBadge : Control
+    {
+        bool hover;
+        public bool On;
+        public NBadge()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.SupportsTransparentBackColor, true);
+            BackColor = Color.Transparent; Size = new Size(30, 30); Cursor = Cursors.Hand;
+        }
+        protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hover = false; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
+            var br = new RectangleF(2f, 2f, Width - 5f, Height - 5f);
+            Color bf = On ? (hover ? G.BrandHover : G.Brand) : (hover ? G.Hover : G.Raised);
+            using (var b = new SolidBrush(bf)) g.FillEllipse(b, br);
+            using (var pen = new Pen(On ? G.Bg : (hover ? G.Brand : G.LineHover), 1.6f)) g.DrawEllipse(pen, br);
+            using (var f = new Font("Segoe UI", 10f, FontStyle.Bold))
+                TextRenderer.DrawText(g, "n", f, Rectangle.Round(br), On ? G.Ink : (hover ? G.Bright : G.Muted),
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+        }
+    }
+
     // Tavaline nupp (Salvesta, Lülita kõik ...), ümarate nurkadega.
     public class Pill : Control
     {
@@ -1055,7 +1127,10 @@ namespace DlUi
         public bool Primary;
         public bool Danger;   // punane (kustutamisrežiim)
         public bool Dark;     // tume "Quick Buy" kast (päises ja alumisel ribal)
+        public Color Fill = Color.Empty;   // oma värv (valikurežiimi värv); Outline = ainult värviline äär
+        public bool Outline;
         public int Radius = 8;
+        protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
 
         public Pill()
         {
@@ -1087,6 +1162,13 @@ namespace DlUi
             else if (Primary) { fill = hover ? G.BrandHover : G.Brand; line = fill; text = G.Ink; }
             else if (Dark) { fill = hover ? G.DarkHover : G.DarkFill; line = hover ? G.Brand : G.DarkLine; text = hover ? G.HeadBright : G.HeadText; }
             else { fill = hover ? G.Hover : G.Raised; line = hover ? G.LineHover : G.Line2; text = hover ? G.Bright : G.Text; }
+            if (!Fill.IsEmpty)
+            {
+                // valikurežiimi nupud alumisel ribal: režiimi värvi (täidetud või värvilise äärega), et silma paistaks
+                if (Outline) { fill = hover ? G.Mix(G.DarkFill, Fill, 0.35f) : G.Mix(G.DarkFill, Fill, 0.18f); line = G.Mix(Fill, Color.White, 0.25f); text = Color.White; }
+                else { fill = hover ? G.Mix(Fill, Color.White, 0.15f) : Fill; line = G.Mix(Fill, Color.White, 0.35f); text = Color.White; }
+                if (!Enabled) { fill = G.Mix(fill, G.DarkFill, 0.55f); line = G.Mix(line, G.DarkFill, 0.5f); text = G.Mix(text, G.DarkFill, 0.45f); }
+            }
             using (var p = G.Round(r, Radius))
             {
                 using (var b = new SolidBrush(fill)) g.FillPath(b, p);
@@ -1158,9 +1240,15 @@ namespace DlUi
     // Nimekiri teema värvides: päis kaardi tooniga, kõrgemad read (ruumi), ülejäänu joonistab Windows ise.
     public static class ListStyle
     {
+        [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)] static extern int SetWindowTheme(IntPtr h, string app, string idList);
         public static void Apply(ListView lv, int rowHeight)
         {
             lv.OwnerDraw = true;
+            if (G.Night)   // tumedas teemas ka tume kerimisriba
+            {
+                EventHandler dark = (s, e) => SetWindowTheme(((Control)s).Handle, "DarkMode_Explorer", null);
+                if (lv.IsHandleCreated) dark(lv, EventArgs.Empty); else lv.HandleCreated += dark;
+            }
             var il = new ImageList(); il.ImageSize = new Size(1, rowHeight); lv.SmallImageList = il;
             lv.DrawColumnHeader += (s, e) =>
             {
@@ -1172,6 +1260,130 @@ namespace DlUi
             };
             lv.DrawItem += (s, e) => { e.DrawDefault = true; };
             lv.DrawSubItem += (s, e) => { e.DrawDefault = true; };
+            // rühmade pealkirjad: Windows joonistab need tumesinisena (tumedal taustal ei näe) -> ise
+            if (lv.IsHandleCreated) new GroupPainter(lv); else lv.HandleCreated += (s, e) => new GroupPainter((ListView)s);
+        }
+    }
+
+    // Kuulab ListView NM_CUSTOMDRAW teateid; rühma pealkirja (LVCDI_GROUP) joonistab ise, kontrastse värviga.
+    class GroupPainter : NativeWindow
+    {
+        [StructLayout(LayoutKind.Sequential)] struct NMHDR { public IntPtr hwndFrom; public UIntPtr idFrom; public int code; }
+        [StructLayout(LayoutKind.Sequential)] struct RECT { public int L, T, R, B; }
+        [StructLayout(LayoutKind.Sequential)] struct NMLVCUSTOMDRAW
+        {
+            public NMHDR hdr; public int dwDrawStage; public IntPtr hdc; public RECT rc; public UIntPtr dwItemSpec; public uint uItemState; public IntPtr lItemlParam;
+            public uint clrText, clrTextBk; public int iSubItem; public uint dwItemType;
+        }
+        [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, ref RECT r);
+        static readonly System.Reflection.PropertyInfo IdProp = typeof(ListViewGroup).GetProperty("ID", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        readonly ListView lv;
+        public GroupPainter(ListView lv)
+        {
+            this.lv = lv; AssignHandle(lv.Handle);
+            lv.HandleDestroyed += (s, e) => ReleaseHandle();
+        }
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == 0x204E && m.LParam != IntPtr.Zero)   // WM_REFLECT + WM_NOTIFY
+            {
+                var h = (NMHDR)Marshal.PtrToStructure(m.LParam, typeof(NMHDR));
+                if (h.code == -12)   // NM_CUSTOMDRAW
+                {
+                    var cd = (NMLVCUSTOMDRAW)Marshal.PtrToStructure(m.LParam, typeof(NMLVCUSTOMDRAW));
+                    if (cd.dwItemType == 1 && cd.dwDrawStage == 1)   // LVCDI_GROUP, CDDS_PREPAINT
+                    {
+                        try { Paint(cd.hdc, (int)cd.dwItemSpec.ToUInt32()); m.Result = (IntPtr)4; return; }   // CDRF_SKIPDEFAULT
+                        catch { }
+                    }
+                }
+            }
+            base.WndProc(ref m);
+        }
+        void Paint(IntPtr hdc, int gid)
+        {
+            string text = null;
+            foreach (ListViewGroup g in lv.Groups) { if (IdProp != null && (int)IdProp.GetValue(g, null) == gid) { text = g.Header; break; } }
+            if (text == null) throw new InvalidOperationException();
+            var r = new RECT { T = 1 };   // LVGGR_HEADER
+            SendMessage(lv.Handle, 0x1062, (IntPtr)gid, ref r);   // LVM_GETGROUPRECT
+            var rect = Rectangle.FromLTRB(r.L, r.T, r.R, r.B);
+            Color bg = lv.BackColor;
+            bool dark = bg.GetBrightness() < 0.5f;
+            Color fg = dark ? ColorTranslator.FromHtml("#E8C06A") : ColorTranslator.FromHtml("#5A3A0A");
+            using (var gr = Graphics.FromHdc(hdc))
+            {
+                using (var b = new SolidBrush(bg)) gr.FillRectangle(b, rect);
+                var tr = new Rectangle(rect.Left + 10, rect.Top, rect.Width - 14, rect.Height);
+                using (var f = new Font(lv.Font, FontStyle.Bold))
+                {
+                    TextRenderer.DrawText(gr, text, f, tr, fg, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+                    int w = TextRenderer.MeasureText(gr, text, f, tr.Size, TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding).Width;
+                    int y = rect.Top + rect.Height / 2, x0 = Math.Min(tr.Left + w + 12, rect.Right);
+                    using (var p = new Pen(Color.FromArgb(110, fg))) if (x0 < rect.Right - 10) gr.DrawLine(p, x0, y, rect.Right - 10, y);
+                }
+            }
+        }
+    }
+
+    // Failivalija, mis ei lukusta rakendust: oma lõimes, ilma omanikuta (oma nupp tegumiribal), minimeerimise nupuga.
+    // Rakendus töötab samal ajal edasi; valija võib kõrvale jääda. Tagastab valitud failid või null.
+    public static class FreePicker
+    {
+        delegate bool EnumProc(IntPtr h, IntPtr l);
+        [DllImport("user32.dll")] static extern bool EnumThreadWindows(uint tid, EnumProc f, IntPtr l);
+        [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr h, int i);
+        [DllImport("user32.dll")] static extern int SetWindowLong(IntPtr h, int i, int v);
+        [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr a, int x, int y, int cx, int cy, uint f);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, System.Text.StringBuilder sb, int n);
+        [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+        [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int c);
+        [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+        public static bool Busy;
+
+        public static string[] Open(string title, string filter, string dir, bool multi)
+        {
+            if (Busy) return null;
+            Busy = true;
+            string[] result = null; uint tid = 0;
+            var t = new System.Threading.Thread(() =>
+            {
+                tid = GetCurrentThreadId();
+                using (var dlg = new OpenFileDialog())
+                {
+                    dlg.Title = title; dlg.Filter = filter; dlg.Multiselect = multi;
+                    if (!string.IsNullOrEmpty(dir)) dlg.InitialDirectory = dir;
+                    if (dlg.ShowDialog() == DialogResult.OK) result = dlg.FileNames;
+                }
+            });
+            t.SetApartmentState(System.Threading.ApartmentState.STA); t.IsBackground = true; t.Start();
+            bool styled = false;
+            try
+            {
+                while (t.IsAlive)
+                {
+                    Application.DoEvents(); System.Threading.Thread.Sleep(15);
+                    if (Application.OpenForms.Count == 0) return null;   // rakendus suleti
+                    if (!styled && tid != 0)
+                    {
+                        EnumThreadWindows(tid, (h, l) =>
+                        {
+                            var sb = new System.Text.StringBuilder(64); GetClassName(h, sb, 64);
+                            if (sb.ToString() == "#32770" && IsWindowVisible(h))
+                            {
+                                SetWindowLong(h, -16, GetWindowLong(h, -16) | 0x00020000 | 0x00080000);   // WS_MINIMIZEBOX | WS_SYSMENU
+                                SetWindowLong(h, -20, GetWindowLong(h, -20) | 0x00040000);                // WS_EX_APPWINDOW: oma nupp tegumiribal
+                                ShowWindow(h, 0); ShowWindow(h, 5);                                        // tegumiriba märkab muutust
+                                SetWindowPos(h, IntPtr.Zero, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0004 | 0x0020);   // NOSIZE|NOMOVE|NOZORDER|FRAMECHANGED
+                                styled = true;
+                            }
+                            return true;
+                        }, IntPtr.Zero);
+                    }
+                }
+                return result;
+            }
+            finally { Busy = false; }
         }
     }
 
@@ -1317,6 +1529,26 @@ namespace DlUi
                 using (var b = new SolidBrush(G.SearchFill)) g.FillPath(b, p);
                 using (var pen = new Pen(Focused2 ? G.Brand : (G.Deco ? G.DarkLine : G.Line2), 1f)) g.DrawPath(pen, p);
             }
+        }
+    }
+}
+
+// Windowsi funktsioonid rakenduse skriptidele (enne eraldi Add-Type: iga käivitus kompileeris selle uuesti)
+namespace DlToggle
+{
+    public static class Native
+    {
+        [DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int val, int size);
+        [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)] public static extern int SetWindowTheme(IntPtr h, string app, string idList);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, string l);
+        [StructLayout(LayoutKind.Sequential)] struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
+        [DllImport("user32.dll")] static extern bool GetLastInputInfo(ref LASTINPUTINFO i);
+        // mitu ms pole hiirt ega klaviatuuri liigutatud (taustal ehitamine ainult siis, kui kasutaja ei tee midagi)
+        public static int IdleMs()
+        {
+            var i = new LASTINPUTINFO(); i.cbSize = (uint)Marshal.SizeOf(typeof(LASTINPUTINFO));
+            if (!GetLastInputInfo(ref i)) return 0;
+            return (int)((uint)Environment.TickCount - i.dwTime);
         }
     }
 }

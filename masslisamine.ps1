@@ -9,13 +9,24 @@ function Show-MassAdd($files) {
     if ($script:AddBusy) { return }
     $script:AddBusy = $true; $addBtn.Enabled = $false
     # Olek ühes hashtable'is: sündmuste skriptiplokid muudavad seda (muutuja omistamine teeks koopia)
-    $st = @{ Items = (New-Object Collections.ArrayList); Busy = $false; Closing = $false; Zones = @(); Filling = $false }
+    $st = @{ Items = (New-Object Collections.ArrayList); Busy = $false; Closing = $false; Zones = @(); Filling = $false; Seq = 0 }
     $cats = @('Skins', 'Map', 'Visuals', 'Sounds & music', 'Utility (recommended)')
     $dests = @('New') + $(if ($Portable) { @() } else { @('Other', 'These') }) + @($CustomTabs.Keys | ForEach-Object { "tab:$_" }) + @('Skip')
     $destText = @{ New = $(if ($Portable) { 'All mods' } else { 'New (choose later)' }); Other = 'Other'; These = 'These'; Skip = 'Skip (don''t add)' }
     foreach ($t in $CustomTabs.Keys) { $destText["tab:$t"] = "Tab: $t" }
     # olemasolevad modid, millele saab alti/lisa panna (kangelase järgi sorteeritud)
     $parents = @($Mods | Where-Object { -not $_.Parent } | Sort-Object @{ e = { "$(Get-HeroName $_)" } }, @{ e = { $_.Name } })
+    # Ema võib olla ka selles nimekirjas olev mod (mod ja tema alt korraga): siis on Parent = tema võti "@N"
+    $batchItem = { param($k) @($st.Items | Where-Object { $_.Key -eq $k })[0] }
+    $parName = { param($k) if ("$k" -like '@*') { $b = & $batchItem $k; if ($b) { "$($b.Row.Text) (new)" } else { '?' } } else { Get-ShortName $ById[$k] } }
+    $parCat = { param($k) if ("$k" -like '@*') { $b = & $batchItem $k; if ($b) { $b.Cat } else { $null } } else { $ById[$k].Cat } }
+    $parLabel = {
+        param($k, $score)
+        $star = if ($score -ge 3) { '★ ' } else { '' }
+        if ("$k" -like '@*') { $b = & $batchItem $k; $h = if ($b.Prep -and $b.Prep.Hero) { "$($b.Prep.Hero.Display.ToUpper()) · " } else { '' }; return "$star$h$($b.Row.Text)   (in this list)" }
+        $pm = $ById[$k]; $h = Get-HeroName $pm
+        "$star$(if ($pm.Hero -and $h) { "$($h.ToUpper()) · " })$(Get-ShortName $pm)$(if ($State[$k]) { '   (on)' })"
+    }
     # Kellele see mod sobiks altiks/lisaks: sama kangelane, sarnane nimi, praegu sees olev mod -> eespool
     $suggest = {
         param($it)
@@ -28,7 +39,16 @@ function Show-MassAdd($files) {
             if ($State[$pm.Id]) { $sc += 0.5 }
             [pscustomobject]@{ Id = $pm.Id; Score = $sc }
         }
-        return , @($scored | Sort-Object Score -Descending)
+        # samas nimekirjas olevad modid (mitte ise, mitte alt, mitte vahele jäetud)
+        $batch = foreach ($o in $st.Items) {
+            if ($o -eq $it -or $o.Parent -or $o.Dest -eq 'Skip' -or $o.State -eq 'error') { continue }
+            $sc = 1
+            $ohk = if ($o.Prep -and $o.Prep.Hero) { $o.Prep.Hero.Key } else { $null }
+            if ($hk -and $ohk -eq $hk) { $sc += 3 }
+            $sc += 5 * (Get-Sim $nm "$($o.Row.Text) $([IO.Path]::GetFileNameWithoutExtension($o.File))")
+            [pscustomobject]@{ Id = $o.Key; Score = $sc }
+        }
+        return , @(@($batch) + @($scored) | Sort-Object Score -Descending)
     }
 
     $d = New-Object Windows.Forms.Form
@@ -51,7 +71,7 @@ function Show-MassAdd($files) {
     [DlUi.ListStyle]::Apply($lv, 26)
     $groups = @{}
     foreach ($k in $dests) { $grp = New-Object Windows.Forms.ListViewGroup($k, $destText[$k]); [void]$lv.Groups.Add($grp); $groups[$k] = $grp }
-    $grpAlt = New-Object Windows.Forms.ListViewGroup('alt', 'Alts / add-ons for existing mods'); [void]$lv.Groups.Insert(0, $grpAlt)
+    $grpAlt = New-Object Windows.Forms.ListViewGroup('alt', 'Alts / add-ons'); [void]$lv.Groups.Insert(0, $grpAlt)
 
     # --- valitud ridade seaded ---
     $ed = New-Object Windows.Forms.Panel
@@ -63,7 +83,7 @@ function Show-MassAdd($files) {
         param($w)
         $cb = New-Object Windows.Forms.ComboBox
         $cb.DropDownStyle = 'DropDownList'; $cb.FlatStyle = 'Flat'; $cb.BackColor = $G::Raised; $cb.ForeColor = $G::Bright; $cb.Width = $w; $cb.MaxDropDownItems = 20
-        $cb.Add_HandleCreated({ [void][DlToggle.Native]::SetWindowTheme($this.Handle, $(if ($Deco) { 'Explorer' } else { 'DarkMode_CFD' }), $null) })
+        $cb.Add_HandleCreated({ [void][DlToggle.Native]::SetWindowTheme($this.Handle, $(if ($Deco -and -not $Night) { 'Explorer' } else { 'DarkMode_CFD' }), $null) })
         $cb
     }
     $l1 = New-Object Windows.Forms.Label; $l1.Text = 'Add as:'; $l1.AutoSize = $true; $l1.ForeColor = $G::Text; $l1.Location = New-Object Drawing.Point(10, 40)
@@ -74,9 +94,8 @@ function Show-MassAdd($files) {
         $st.Order = $order
         $asBox.BeginUpdate(); $asBox.Items.Clear(); [void]$asBox.Items.Add('Its own mod')
         foreach ($pid2 in $order) {
-            $pm = $ById[$pid2]; $h = Get-HeroName $pm
-            $star = if ($scores -and $scores[$pid2] -ge 3) { '★ ' } else { '' }
-            [void]$asBox.Items.Add("$($star)Alt / add-on for:  $(if ($pm.Hero -and $h) { "$($h.ToUpper()) · " })$(Get-ShortName $pm)$(if ($State[$pid2]) { '   (on)' })")
+            $scv = if ($scores) { $scores[$pid2] } else { 0 }
+            [void]$asBox.Items.Add("Alt / add-on for:  $(& $parLabel $pid2 $scv)")
         }
         $asBox.EndUpdate()
     }
@@ -86,7 +105,7 @@ function Show-MassAdd($files) {
     [void]$styleBox.Items.AddRange(@('+ button next to it', '"n" in its corner'))
     if ($Portable) { $l2.Visible = $false; $styleBox.Visible = $false }
     $edHint = New-Object Windows.Forms.Label; $edHint.AutoSize = $true; $edHint.ForeColor = $DlgMuted; $edHint.Location = New-Object Drawing.Point(10, 66)
-    $edHint.Text = 'Alt / add-on: goes on together with that mod (e.g. other textures, voice lines). Own mod: shows as its own button.'
+    $edHint.Text = 'Alt / add-on: goes with that mod - also one you are adding now (in this list). Own mod: its own button.'
     $ed.Controls.AddRange(@($edLab, $l1, $asBox, $l2, $styleBox, $edHint))
 
     # Paremal: sihtkastid
@@ -110,7 +129,7 @@ function Show-MassAdd($files) {
     # --- abifunktsioonid (skriptiplokid, et sündmused neid näeksid) ---
     $rowText = {
         param($it)
-        if ($it.Parent) { $pm = $ById[$it.Parent]; "$(if ($it.Style -eq 'badge') { 'n' } else { '+' }) alt of $(Get-ShortName $pm)" } else { 'Own mod' }
+        if ($it.Parent) { "$(if ($it.Style -eq 'badge') { 'n' } else { '+' }) alt of $(& $parName $it.Parent)" } else { 'Own mod' }
     }
     $refresh = {
         $ready = 0; $wait = 0; $bad = 0; $add = 0
@@ -142,7 +161,8 @@ function Show-MassAdd($files) {
             if (-not $f -or @($st.Items | Where-Object { $_.File -eq $f }).Count) { continue }
             $row = New-Object Windows.Forms.ListViewItem([IO.Path]::GetFileNameWithoutExtension($f))
             [void]$row.SubItems.Add('…'); [void]$row.SubItems.Add('…'); [void]$row.SubItems.Add('Own mod'); [void]$row.SubItems.Add('Waiting')
-            $it = @{ File = $f; Row = $row; Prep = $null; State = 'wait'; Dest = 'New'; Cat = $null; Parent = $null; Style = 'chip' }
+            $st.Seq++
+            $it = @{ File = $f; Row = $row; Prep = $null; State = 'wait'; Dest = 'New'; Cat = $null; Parent = $null; Style = 'chip'; Key = "@$($st.Seq)" }
             $row.Tag = $it
             $row.Group = $groups['New']
             [void]$lv.Items.Add($row)
@@ -174,7 +194,12 @@ function Show-MassAdd($files) {
     $asBox.Add_SelectedIndexChanged({
         if ($st.Filling -or $asBox.SelectedIndex -lt 0) { return }
         $parId = if ($asBox.SelectedIndex -eq 0) { $null } else { $st.Order[$asBox.SelectedIndex - 1] }
-        foreach ($row in @($lv.SelectedItems)) { $row.Tag.Parent = $parId; if ($parId) { $row.Tag.Cat = $ById[$parId].Cat; $row.SubItems[2].Text = $row.Tag.Cat } }
+        foreach ($row in @($lv.SelectedItems)) {
+            if ($parId -and $row.Tag.Key -eq $parId) { continue }
+            $row.Tag.Parent = $parId; if ($parId) { $c0 = & $parCat $parId; if ($c0) { $row.Tag.Cat = $c0; $row.SubItems[2].Text = $c0 } }
+            # sellest saab alt -> tema enda altid lähevad tema ema alla
+            if ($parId) { foreach ($o in $st.Items) { if ($o.Parent -eq $row.Tag.Key) { $o.Parent = $parId } } }
+        }
         & $refresh; & $showSel
     })
     $styleBox.Add_SelectedIndexChanged({
@@ -194,10 +219,18 @@ function Show-MassAdd($files) {
         $hdrItem = $altMenu.Items.Add("$(if ($style -eq 'badge') { '"n" alt' } else { '+ alt / add-on' }) of which mod?  (best matches first)"); $hdrItem.Enabled = $false
         $i = 0
         foreach ($x in $sug) {
-            $pm = $ById[$x.Id]; $h = Get-HeroName $pm
-            $mi = $altMenu.Items.Add("$(if ($x.Score -ge 3) { '★ ' })$(if ($pm.Hero -and $h) { "$($h.ToUpper()) · " })$(Get-ShortName $pm)$(if ($State[$x.Id]) { '   (on)' })")
+            $mi = $altMenu.Items.Add((& $parLabel $x.Id $x.Score))
             $mi.Tag = @{ Parent = $x.Id; Style = $style }
-            $mi.Add_Click({ foreach ($row in @($lv.SelectedItems)) { $row.Tag.Parent = $this.Tag.Parent; $row.Tag.Style = $this.Tag.Style; $row.Tag.Cat = $ById[$this.Tag.Parent].Cat; $row.SubItems[2].Text = $row.Tag.Cat; if ($row.Tag.Dest -eq 'Skip') { $row.Tag.Dest = 'New' } }; & $refresh; & $showSel })
+            $mi.Add_Click({
+                foreach ($row in @($lv.SelectedItems)) {
+                    if ($row.Tag.Key -eq $this.Tag.Parent) { continue }
+                    $row.Tag.Parent = $this.Tag.Parent; $row.Tag.Style = $this.Tag.Style
+                    $c0 = & $parCat $this.Tag.Parent; if ($c0) { $row.Tag.Cat = $c0; $row.SubItems[2].Text = $c0 }
+                    if ($row.Tag.Dest -eq 'Skip') { $row.Tag.Dest = 'New' }
+                    foreach ($o in $st.Items) { if ($o.Parent -eq $row.Tag.Key) { $o.Parent = $this.Tag.Parent } }
+                }
+                & $refresh; & $showSel
+            })
             $i++; if ($i -ge 25) { break }
         }
         $altMenu.Show($where)
@@ -289,6 +322,7 @@ function Show-MassAdd($files) {
             $it = $row.Tag
             if ($it.State -eq 'checking') { $it.Dest = 'Skip'; $it.Parent = $null; continue }   # käib veel: lihtsalt jäta välja
             Clear-PreparedMod $it.Prep; $st.Items.Remove($it); $lv.Items.Remove($row)
+            foreach ($o in $st.Items) { if ($o.Parent -eq $it.Key) { $o.Parent = $null } }   # tema altid jäävad eraldi modideks
         }
         & $refresh; & $showSel
     })
@@ -318,7 +352,7 @@ function Show-MassAdd($files) {
             $row.ToolTipText = (($p.Log | ForEach-Object { "• $_" }) -join "`n")
             $it.State = 'ready'
         } catch {
-            $it.State = 'error'; $row.SubItems[4].Text = "Failed: $($_.Exception.Message)"; $row.ForeColor = [DlUi.G]::Hex('#8E2A20')
+            $it.State = 'error'; $row.SubItems[4].Text = "Failed: $($_.Exception.Message)"; $row.ForeColor = [DlUi.G]::Fg('#8E2A20')
             $row.ToolTipText = $_.Exception.Message
         }
         $st.Busy = $false
@@ -336,14 +370,20 @@ function Show-MassAdd($files) {
     try {
         if ($res -eq 'OK') {
             $form.Cursor = 'WaitCursor'
-            foreach ($it in @($st.Items)) {
+            # kõigepealt emad, siis nimekirjas oleva ema altid (ema uue id-ga)
+            $made = @{}
+            $first = @($st.Items | Where-Object { "$($_.Parent)" -notlike '@*' }); $later = @($st.Items | Where-Object { "$($_.Parent)" -like '@*' })
+            foreach ($it in @($first + $later)) {
                 if ($it.State -ne 'ready' -or $it.Dest -eq 'Skip') { continue }
                 $p = $it.Prep
                 Set-Busy "Adding: $($it.Row.Text)"
-                $hk = $null; $hn = $null; if ($p.Hero -and -not $it.Parent) { $hk = $p.Hero.Key; $hn = $p.Hero.Display }
-                $sty = if ($it.Parent) { $(if ($Portable) { 'chip' } else { $it.Style }) } else { $null }
-                $ans = @{ Name = $it.Row.Text.Trim(); Cat = $it.Cat; HeroKey = $hk; HeroName = $hn; Parent = $it.Parent; AltStyle = $sty; Where = $it.Dest }
-                try { $r = Install-PreparedMod $p $ans; $done += $r.Name; $it.Prep = $null }
+                $par = $it.Parent
+                if ("$par" -like '@*') { $par = $made[$par] }   # ema jäi lisamata -> lisatakse eraldi modina
+                $hk = $null; $hn = $null; if ($p.Hero -and -not $par) { $hk = $p.Hero.Key; $hn = $p.Hero.Display }
+                $sty = if ($par) { $(if ($Portable) { 'chip' } else { $it.Style }) } else { $null }
+                $ans = @{ Name = $it.Row.Text.Trim(); Cat = $it.Cat; HeroKey = $hk; HeroName = $hn; Parent = $par; AltStyle = $sty; Where = $it.Dest }
+                if (-not $ans.Cat) { $ans.Cat = if ($p.Hero) { 'Skins' } else { 'Visuals' } }
+                try { $r = Install-PreparedMod $p $ans; $done += $r.Name; $it.Prep = $null; $made[$it.Key] = $r.Id }
                 catch { $failed += "$($ans.Name): $($_.Exception.Message)" }
             }
         }

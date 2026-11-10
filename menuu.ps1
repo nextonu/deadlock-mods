@@ -9,7 +9,7 @@ $ModMenu.Font = $FontUi
 $miFav = $ModMenu.Items.Add('★  Favorite')
 [void]$ModMenu.Items.Add((New-Object Windows.Forms.ToolStripSeparator))
 $miRename = $ModMenu.Items.Add('Rename…')
-$miReset = $ModMenu.Items.Add('Restore original name')
+$miReset = New-Object Windows.Forms.ToolStripMenuItem 'Restore original name'   # menüüs pole (Rename algse nimega teeb sama)
 $miParts = $ModMenu.Items.Add('Parts (voice lines, portraits…)…')
 [void]$ModMenu.Items.Add((New-Object Windows.Forms.ToolStripSeparator))
 # Oma vahelehed: lisa / eemalda (mod jääb alati ka "Kõik modid" alla)
@@ -71,7 +71,7 @@ function Save-NameOverride($id, $name) {
 function Show-RenameDialog($current, $caption = 'Rename', $prompt = 'New name (only changes here, files stay the same)') {
     $d = New-Object Windows.Forms.Form
     $d.Text = $caption; $d.BackColor = $DlgBg; $d.ForeColor = $DlgText; $d.Font = $FontUi
-    $d.FormBorderStyle = 'FixedDialog'; $d.MaximizeBox = $false; $d.MinimizeBox = $false
+    $d.FormBorderStyle = 'FixedDialog'; $d.MaximizeBox = $false; Enable-DialogMinimize $d
     $d.StartPosition = 'CenterParent'; $d.ClientSize = New-Object Drawing.Size(440, 150)
     $d.Add_HandleCreated({ $v = 1; [void][DlToggle.Native]::DwmSetWindowAttribute($this.Handle, 20, [ref]$v, 4) })
     $lab = New-Object Windows.Forms.Label
@@ -135,7 +135,7 @@ function Show-BulkAdd($tabName) {
     if (-not $CustomTabs.Contains($tabName)) { return }
     $d = New-Object Windows.Forms.Form
     $d.Text = "Add mods to '$tabName'"; $d.BackColor = $DlgBg; $d.ForeColor = $DlgText; $d.Font = $FontUi
-    $d.FormBorderStyle = 'Sizable'; $d.MinimizeBox = $false; $d.StartPosition = 'CenterParent'
+    $d.FormBorderStyle = 'Sizable'; Enable-DialogMinimize $d; $d.StartPosition = 'CenterParent'
     $d.ClientSize = New-Object Drawing.Size(520, 600); $d.MinimumSize = New-Object Drawing.Size(420, 420)
     $d.Add_HandleCreated({ $v = 1; [void][DlToggle.Native]::DwmSetWindowAttribute($this.Handle, 20, [ref]$v, 4) })
     $lab = New-Object Windows.Forms.Label

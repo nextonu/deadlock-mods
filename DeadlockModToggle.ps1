@@ -4,6 +4,69 @@
 
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 
+# --- Ainult üks aken korraga ---
+# Teine käivitus ei ava uut akent: annab märku juba avatud aknale (see tuleb ette) ja lõpetab.
+# Nimi sõltub kaustast (testide liivakast / jagatav koopia ei sega päris rakendust).
+$InstKey = 'DeadlockModToggle_' + (([BitConverter]::ToString([Security.Cryptography.MD5]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($PSScriptRoot.ToLower())))) -replace '-', '').Substring(0, 12)
+$ShowEvent = New-Object Threading.EventWaitHandle($false, ([Threading.EventResetMode]::AutoReset), "Local\$InstKey.show")
+$created = $false
+$AppMutex = New-Object Threading.Mutex($true, "Local\$InstKey", [ref]$created)
+if (-not $created) {
+    # eelmine aken võib just sulguda (stiili vahetus) -> oota hetk
+    try { $created = $AppMutex.WaitOne(700) } catch [Threading.AbandonedMutexException] { $created = $true }
+    if (-not $created) {
+        try { Add-Type -Namespace DlOnce -Name W -MemberDefinition '[DllImport("user32.dll")] public static extern bool AllowSetForegroundWindow(int pid);'; [void][DlOnce.W]::AllowSetForegroundWindow(-1) } catch {}
+        [void]$ShowEvent.Set(); exit
+    }
+}
+
+# --- Laadimise aken (oma lõimes, et animatsioon liiguks ka siis, kui rakendus alles laeb) ---
+# "Deadlock Mods.exe" (käivitaja) näitab laadimise akent juba ise kohe klõpsu järel -> siin mitte
+$FromLauncher = [bool]$env:DLMODS_LAUNCHER; $env:DLMODS_LAUNCHER = $null
+$Splash = [hashtable]::Synchronized(@{ Close = $false; Event = $ShowEvent })
+$SplashCode = {
+    Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+    $f = New-Object Windows.Forms.Form
+    $f.FormBorderStyle = 'None'; $f.StartPosition = 'CenterScreen'; $f.Size = New-Object Drawing.Size(340, 150)
+    $f.BackColor = [Drawing.ColorTranslator]::FromHtml('#16130F'); $f.Text = 'Deadlock Mods - loading'; $f.ShowInTaskbar = $true
+    $f.GetType().GetProperty('DoubleBuffered', [Reflection.BindingFlags]'NonPublic,Instance').SetValue($f, $true, $null)
+    $st = @{ A = 0.0; Sw = [Diagnostics.Stopwatch]::StartNew() }
+    $gold = [Drawing.ColorTranslator]::FromHtml('#E2B456'); $muted = [Drawing.ColorTranslator]::FromHtml('#9C9384')
+    $fTitle = New-Object Drawing.Font('Bahnschrift SemiBold', 17); $fSmall = New-Object Drawing.Font('Segoe UI', 9.5)
+    $f.Add_Paint({
+        $g = $_.Graphics; $g.SmoothingMode = 'AntiAlias'
+        $pen = New-Object Drawing.Pen([Drawing.ColorTranslator]::FromHtml('#7A5A2E'), 2); $g.DrawRectangle($pen, 1, 1, $f.Width - 3, $f.Height - 3); $pen.Dispose()
+        # pöörlev kuldne kaar
+        $r = New-Object Drawing.RectangleF(34, 47, 56, 56)
+        $bg = New-Object Drawing.Pen([Drawing.Color]::FromArgb(50, $gold), 5); $g.DrawEllipse($bg, $r); $bg.Dispose()
+        $arc = New-Object Drawing.Pen($gold, 5); $arc.StartCap = 'Round'; $arc.EndCap = 'Round'
+        $sweep = 70 + 50 * [Math]::Sin($st.A / 40)
+        $g.DrawArc($arc, $r, [float]$st.A, [float]$sweep); $arc.Dispose()
+        $tb = New-Object Drawing.SolidBrush($gold); $g.DrawString('DEADLOCK MODS', $fTitle, $tb, 110, 44); $tb.Dispose()
+        $dots = '.' * (1 + [int]($st.Sw.ElapsedMilliseconds / 400) % 3)
+        $mb = New-Object Drawing.SolidBrush($muted); $g.DrawString("Loading your mods$dots", $fSmall, $mb, 113, 80); $mb.Dispose()
+    })
+    $t = New-Object Windows.Forms.Timer; $t.Interval = 25
+    $t.Add_Tick({
+        $st.A = ($st.A + 9) % 360; $f.Invalidate()
+        if ($Splash.Event.WaitOne(0)) { $f.TopMost = $true; $f.Activate(); $f.TopMost = $false }   # avati uuesti laadimise ajal
+        if ($Splash.Close -or $st.Sw.Elapsed.TotalSeconds -gt 90) { $t.Stop(); $f.Close() }
+    })
+    $f.Add_Shown({ $t.Start() })
+    [Windows.Forms.Application]::Run($f)
+}
+if (-not $FromLauncher) {
+    $splashRs = [RunspaceFactory]::CreateRunspace(); $splashRs.ApartmentState = 'STA'; $splashRs.ThreadOptions = 'ReuseThread'; $splashRs.Open()
+    $splashRs.SessionStateProxy.SetVariable('Splash', $Splash)
+    $SplashPs = [PowerShell]::Create(); $SplashPs.Runspace = $splashRs
+    [void]$SplashPs.AddScript($SplashCode.ToString())
+    $SplashJob = $SplashPs.BeginInvoke()
+}
+function Close-Splash {
+    $Splash.Close = $true
+    if ($FromLauncher) { try { $ev = [Threading.EventWaitHandle]::OpenExisting("Local\$InstKey.ready"); [void]$ev.Set(); $ev.Dispose() } catch {} }
+}
+
 # Jagatav versioon (make_share.ps1): fail portable.txt -> ainult "All mods" vaheleht, Sqookyt pole, tööriistad kaustas tools\
 $Portable = Test-Path -LiteralPath (Join-Path $PSScriptRoot 'portable.txt')
 
@@ -24,6 +87,7 @@ function Find-Citadel {
 }
 $Citadel = Find-Citadel
 if (-not $Citadel) {
+    Close-Splash
     $fb = New-Object Windows.Forms.FolderBrowserDialog
     $fb.Description = 'Deadlock was not found. Choose the Deadlock folder (…\steamapps\common\Deadlock).'
     while (-not $Citadel) {
@@ -226,7 +290,25 @@ function Test-RowOn($row) { foreach ($id in $row) { if ($State[$id]) { return $t
 
 
 # --- välimus: tume, Ajukase värvid. Joonistatud osad (kaardid, nupud) on failis ui.cs ---
-Add-Type -Path (Join-Path $PSScriptRoot 'ui.cs') -ReferencedAssemblies System.Windows.Forms, System.Drawing
+# ui.cs kompileeritakse ainult siis, kui see on muutunud (valmis DLL vahemälus; enne kompileeriti iga käivitusega, ~1 s)
+function Import-UiCs {
+    $cs = Join-Path $PSScriptRoot 'ui.cs'
+    $hash = (Get-FileHash -LiteralPath $cs -Algorithm SHA1).Hash.Substring(0, 16)
+    $dir = Join-Path $env:LOCALAPPDATA 'DeadlockMods\cache'
+    $dll = Join-Path $dir "ui_$hash.dll"
+    try {
+        if (-not (Test-Path -LiteralPath $dll)) {
+            New-Item -ItemType Directory -Force $dir | Out-Null
+            $tmp = Join-Path $dir "ui_$hash.$PID.tmp.dll"
+            Add-Type -Path $cs -ReferencedAssemblies System.Windows.Forms, System.Drawing -OutputAssembly $tmp -OutputType Library
+            Move-Item -LiteralPath $tmp $dll -Force
+            Get-ChildItem $dir -Filter 'ui_*.dll' | Where-Object { $_.FullName -ne $dll } | Remove-Item -ErrorAction SilentlyContinue   # vanad (lukus olevad jäävad)
+        }
+        Add-Type -Path $dll; return
+    } catch {}
+    Add-Type -Path $cs -ReferencedAssemblies System.Windows.Forms, System.Drawing   # varuvariant: nagu enne
+}
+Import-UiCs
 
 # Teema: "deadlock" (poe stiil, vaikimisi) või "ajukas" (eelmine must-kollane). Valik failis seaded.json.
 # Eelmise välimuse täielik koopia on kaustas varu_ajukas_stiil.
@@ -237,13 +319,10 @@ if (Test-Path -LiteralPath $SettingsFile) {
 }
 [DlUi.G]::Apply($Theme)
 $Deco = [DlUi.G]::Deco
+$Night = [DlUi.G]::Night
 # Akende (Add mod, Rename, Bulk add) värvid: Deadlocki teemas paberleht tumeda kirjaga
 $DlgBg = if ($Deco) { [DlUi.G]::PageBg } else { [DlUi.G]::Bg }; $DlgText = [DlUi.G]::Text; $DlgMuted = [DlUi.G]::Muted
-Add-Type -Namespace DlToggle -Name Native -MemberDefinition @'
-[DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int val, int size);
-[DllImport("uxtheme.dll", CharSet = CharSet.Unicode)] public static extern int SetWindowTheme(IntPtr h, string app, string idList);
-[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, string l);
-'@
+# [DlToggle.Native] (DwmSetWindowAttribute, SetWindowTheme, SendMessage) on failis ui.cs
 [Windows.Forms.Application]::EnableVisualStyles()
 $G = [DlUi.G]
 
@@ -303,15 +382,28 @@ function Get-CardShownMod($row) {
     return $main
 }
 # Kaardi pilt: sees oleva modi (või tema sees oleva aldi) pilt; ühe modiga kaardil tema pilt; muidu kangelase pilt; muidu mõne modi pilt
-function Get-CardPicture($row, $heroImg) {
+$PlainPicTabs = @()   # vahelehed, kus kaardil on kangelase pilt, mitte modi oma (minu.ps1)
+$TabExtras = $null    # lisanupud vahelehe "Turn all" ritta (minu.ps1)
+$BuildingTab = $null
+$AfterUpdate = $null   # kutsutakse Update-Boxes'i lõpus (minu.ps1)
+$AfterSave = $null     # kutsutakse pärast õnnestunud salvestamist (minu.ps1)
+function Get-CardPicture($row, $heroImg, $tab = $null) {
+    if ($tab -and ($script:PlainPicTabs -contains $tab)) { return $heroImg }   # kangelaseta modil (kaart jms) pilti pole
+    # PlainPicTabs vahelehe modide pildid on peidus ka teistel vahelehtedel (lisafail võib selle seada)
     $id = Get-CardShownMod $row
-    if ($id) { $p = Get-ModPicture $id; if ($p) { return $p } }
-    foreach ($id in $row) { if ($State[$id]) { $p = Get-ModPicture $id; if ($p) { return $p } } }
-    if (@($row).Count -eq 1) { $p = Get-ModPicture $row[0]; if ($p) { return $p } }
+    if ($id) { $p = Get-ShownModPicture $id; if ($p) { return $p } }
+    foreach ($id in $row) { if ($State[$id]) { $p = Get-ShownModPicture $id; if ($p) { return $p } } }
+    if (@($row).Count -eq 1) { $p = Get-ShownModPicture $row[0]; if ($p) { return $p } }
     if ($heroImg) { return $heroImg }
-    foreach ($id in $row) { $p = Get-ModPicture $id; if ($p) { return $p } }
+    foreach ($id in $row) { $p = Get-ShownModPicture $id; if ($p) { return $p } }
     return $null
 }
+function Test-OtherPicHidden($id) {
+    if ($script:PlainPicTabs -notcontains 'Other') { return $false }
+    $m = $ById[$id]; $main = if ($m -and $m.Parent) { $m.Parent } else { $id }
+    return ($SkinTab -contains $main -or $SkinTab -contains $id)
+}
+function Get-ShownModPicture($id) { if (Test-OtherPicHidden $id) { return $null }; return (Get-ModPicture $id) }
 # Kangelase nimi kaardile ja pildile: nimes sulgudes, või (lülitist lisatud modidel) Hero võtme järgi.
 function Get-HeroName($mod) {
     if ($mod.Name -match '\(([^)]*)\)') { return $Matches[1] }
@@ -334,7 +426,7 @@ function Update-Boxes {
     foreach ($c in $Cards) {
         $on = Test-RowOn $c.Row
         if ($c.Card.On -ne $on) { $c.Card.On = $on; $c.Card.Invalidate() }
-        if ($c.Card.Picture) { $pic = Get-CardPicture $c.Row $c.HeroImg; if ($pic -and -not [object]::ReferenceEquals($pic, $c.Card.Picture)) { $c.Card.Picture = $pic; $c.Card.Invalidate() } }
+        if ($c.Card.Picture) { $pic = Get-CardPicture $c.Row $c.HeroImg $c.Tab; if ($pic -and -not [object]::ReferenceEquals($pic, $c.Card.Picture)) { $c.Card.Picture = $pic; $c.Card.Invalidate() } }
         $c.Title.ForeColor = if ($on) { $G::Bright } else { $G::Text }
     }
     foreach ($a in $AllBoxes) {
@@ -350,6 +442,7 @@ function Update-Boxes {
     if ($diff) { $note.Text = "●  $diff unsaved change" + $(if ($diff -gt 1) { 's' } else { '' }); $note.ForeColor = $G::Brand }
     else { $note.Text = 'Changes reach the game after you press Save and start Deadlock. Don''t want to keep them? Just close the app.'; $note.ForeColor = $G::HeadMuted }
     $script:syncing = $false
+    if ($script:AfterUpdate) { & $script:AfterUpdate }   # nt Otheri "n" nupp (minu.ps1)
 }
 
 function New-Pill($text, [bool]$primary) {
@@ -402,7 +495,7 @@ if ($Deco) {
     # Päis ja alumine riba nagu poe tumedad paneelid: tume kulunud paber + pronksist äär
     $DarkBar = {
         param($gfx, $r, [bool]$trimBottom)   # NB: mitte $g - see on sama mis $G (teema)
-        [DlUi.G]::PaintPaper($gfx, $r, [DlUi.G]::Hex('#2A231C'), $true)
+        [DlUi.G]::PaintPaper($gfx, $r, [DlUi.G]::Hex($(if ($Night) { '#16130F' } else { '#2A231C' })), $true)
         $sh = New-Object Drawing.Drawing2D.LinearGradientBrush($r, [Drawing.Color]::FromArgb(0, 0, 0, 0), [Drawing.Color]::FromArgb(70, 0, 0, 0), $(if ($trimBottom) { 270 } else { 90 }))
         $gfx.FillRectangle($sh, $r); $sh.Dispose()
         $y = if ($trimBottom) { $r.Bottom - 3 } else { $r.Top }
@@ -463,6 +556,36 @@ $content.Controls.Add($Scroll)
 $TabBtns = @()
 $CurTab = 0
 function Show-Tab($i, [bool]$instant) {
+    if (-not $TabBtns[$i].Built) { $form.Cursor = 'WaitCursor'; try { Prebuild-Tab $i } finally { $form.Cursor = 'Default' } }
+    Show-TabNow $i $instant
+}
+# Vahelehe kaardid valmis (esimesel avamisel või taustal, vt $PrebuildTimer)
+function Prebuild-Tab($i) {
+    if ($TabBtns[$i].Built) { return }
+    $nAll = $AllBoxes.Count; $nAlt = $AltChips.Count; $script:FillChips = New-Object Collections.ArrayList
+    Fill-TabPage $TabBtns[$i]
+    $newChips = $script:FillChips; $script:FillChips = $null
+    if (-not $script:InBuildTabs) {
+        # ainult selle vahelehe nupud/kaardid/loendur (kogu Update-Boxes võttis ~0,5 s)
+        $script:syncing = $true
+        foreach ($b in $newChips) { $b.Checked = [bool]$State[$b.Tag] }
+        foreach ($ac in @($AltChips | Select-Object -Skip $nAlt)) { $ac.Chip.AltOn = [bool]$State[$ac.Alt] }
+        $script:syncing = $false
+        foreach ($c in $Cards) {
+            if ($c.Tab -ne $TabBtns[$i].Title) { continue }
+            $on = Test-RowOn $c.Row; $c.Card.On = $on; $c.Title.ForeColor = if ($on) { $G::Bright } else { $G::Text }
+        }
+        foreach ($a in @($AllBoxes | Select-Object -Skip $nAll)) {
+            $n = 0; foreach ($row in $a.Rows) { if (Test-RowOn $row) { $n++ } }
+            $a.Full = ($n -eq $a.Rows.Count); $a.Box.Text = if ($a.Full) { 'Turn all off' } else { 'Turn all on' }; $a.Count.Text = "$n / $($a.Rows.Count) on"
+        }
+        if ($script:AfterUpdate) { & $script:AfterUpdate }
+        if ($search.Text.Trim()) { Apply-Search }
+        if ($script:DeleteMode -and (Get-Command Update-DeleteUi -ErrorAction SilentlyContinue)) { Update-DeleteUi }
+        Initialize-Page $TabBtns[$i] $newChips
+    }
+}
+function Show-TabNow($i, [bool]$instant) {
     foreach ($tb in $TabBtns) { $tb.Page.SyncNow() }   # pooleli kerimine lõpetatakse enne vahetust
     $script:CurTab = $i
     for ($j = 0; $j -lt $TabBtns.Count; $j++) {
@@ -473,8 +596,10 @@ function Show-Tab($i, [bool]$instant) {
         if ($sel) { if ($clip.Parent -ne $content) { $content.Controls.Add($clip) }; $clip.Visible = $true; $clip.BringToFront() }
         elseif ($clip.Parent -eq $content) { $content.Controls.Remove($clip) }
         if ($sel -and $Scroll) { $Scroll.Target = $t.Page; $Scroll.Invalidate() }
-        $t.Label.ForeColor = if ($sel) { $G::TabSel } elseif ($t.Label.AccessibleDescription -eq 'new') { $(if ($Deco) { $G::TabLine } else { $G::Brand }) } else { $G::TabIdle }
+        $selL = [object]::ReferenceEquals($t.Label, $TabBtns[$i].Label)   # rühma lehtedel on üks ühine silt
+        $t.Label.ForeColor = if ($selL) { $G::TabSel } elseif ($t.Label.AccessibleDescription -eq 'new') { $G::TabNew } else { $G::TabIdle }
     }
+    if ($TabBtns[$i].Group) { $GroupLast[$TabBtns[$i].Group] = $TabBtns[$i].Title }
     $l = $TabBtns[$i].Label
     $UnderTarget.X = [double]$l.Left; $UnderTarget.W = [double]$l.Width
     if ($instant) { $UnderTarget.CurX = $UnderTarget.X; $UnderTarget.CurW = $UnderTarget.W; $under.SetBounds($l.Left, 42, $l.Width, 3) }
@@ -486,10 +611,13 @@ function New-Chip($parent, $text, $id, [bool]$onOff, [bool]$small = $false) {
     $cb.Font = if ($small) { $FontSmallChip } else { $FontChip }
     $cb.Small = $small
     $cb.Text = $(if ($Favorites -contains $id -and -not $onOff) { "★ $text" } else { $text })
+    if ($text -and $script:GoneMods -and $script:GoneMods.ContainsKey($id)) { $cb.Text += '  · page removed' }   # autor võttis GameBanana lehe maha (uuendused.ps1)
     if ($DelMarked -and $DelMarked[$id]) { $cb.Marked = $true }
     if ($small -and -not $Portable -and ($NewIds -contains $id)) { $cb.Badge = 'n' }
     $cb.OnOff = $onOff
-    $cb.NoPic = -not (Test-Path -LiteralPath (Join-Path $ModPicDir "$id.png"))   # väike joon: pilti pole veel
+    # väike joon: pilti pole veel (lisal/aldil loeb ka põhimodi pilt - kaardil on siis see)
+    $pm = $ById[$id]
+    $cb.NoPic = -not (Test-Path -LiteralPath (Join-Path $ModPicDir "$id.png")) -and -not ($pm -and $pm.Parent -and (Test-Path -LiteralPath (Join-Path $ModPicDir "$($pm.Parent).png")))
     $cb.Margin = New-Object Windows.Forms.Padding(0, 0, 6, 6)
     $cb.FitWidth(270)
     $cb.Tag = $id
@@ -511,6 +639,7 @@ function New-Chip($parent, $text, $id, [bool]$onOff, [bool]$small = $false) {
     $parent.Controls.Add($cb)
     if (-not $Boxes[$id]) { $Boxes[$id] = @() }
     $Boxes[$id] += $cb
+    if ($script:FillChips) { [void]$script:FillChips.Add($cb) }   # Show-Tab: selle vahelehe uued nupud
     return $cb
 }
 
@@ -521,7 +650,7 @@ function New-Card($flow, $row, $headerRef, [bool]$placing) {
     $m = $ById[$row[0]]
     $hero = Get-HeroName $m
     $heroImg = Get-HeroImage $hero
-    $img = Get-CardPicture $row $heroImg
+    $img = Get-CardPicture $row $heroImg $script:BuildingTab
     $multi = $row.Count -gt 1
     $I = [DlUi.Card]::Inset
 
@@ -618,7 +747,7 @@ function New-Card($flow, $row, $headerRef, [bool]$placing) {
         if ($ModMenu) { $card.ContextMenuStrip = $ModMenu; $t.ContextMenuStrip = $ModMenu }
     }
     $flow.Controls.Add($card)
-    $script:Cards += @{ Card = $card; Title = $t; Row = $row; Text = ($names -join ' ').ToLower(); Header = $headerRef; HeroImg = $heroImg }
+    $script:Cards += @{ Card = $card; Title = $t; Row = $row; Text = ($names -join ' ').ToLower(); Header = $headerRef; HeroImg = $heroImg; Tab = $script:BuildingTab }
     # paremklõps kaardi pildil: pildi muutmine (pildid.ps1)
     $card.Add_MouseUp({
         if ($_.Button -ne 'Right' -or $this.PicRect.IsEmpty -or -not $this.PicRect.Contains($_.Location)) { return }
@@ -630,7 +759,14 @@ function New-Card($flow, $row, $headerRef, [bool]$placing) {
     })
 }
 
-function Add-Tab($title, $ids, [bool]$withHeaders, [bool]$placing = $false, $hintText = $null) {
+# $flat: järjekord jääb nagu antud (nt suuruse järgi), iga mod oma kaardil, peatükkideta
+# Vahelehe sisu (kaardid) ehitatakse alles siis, kui vaheleht esimest korda avatakse (Fill-TabPage, Show-Tab kutsub):
+# kõigi vahelehtede ehitamine kohe võttis käivitamisel ~4 s. $eager = ehita kohe (kui kutsuja vajab lehte kohe).
+# $after = { param($t) ... } käivitub pärast ehitamist (nt kaartide pealkirjade täiendamine).
+# $group: mitu vahelehte ühe vahelehena ribal (nt "Lists" = No link / No picture / By size); lehe ülaosas nupud
+# nende vahel vahetamiseks, "Turn all" nuppu pole. Ribal on üks silt (jagatud), see avab viimati vaadatud lehe.
+$GroupLast = @{}
+function Add-Tab($title, $ids, [bool]$withHeaders, [bool]$placing = $false, $hintText = $null, [bool]$flat = $false, [bool]$eager = $false, $after = $null, $group = $null) {
     $flow = New-Object DlUi.SmoothFlow
     $flow.Dock = 'Fill'; $flow.AutoScroll = $true; $flow.WrapContents = $true
     $flow.Padding = New-Object Windows.Forms.Padding(14, 8, 14, 16)
@@ -647,15 +783,55 @@ function Add-Tab($title, $ids, [bool]$withHeaders, [bool]$placing = $false, $hin
     # kerimise ajal näidatakse lehe hetktõmmist (sujuv), päris kaardid tõstetakse kohale pärast kerimist
     $snapV = New-Object DlUi.SnapView; $snapV.Dock = 'Fill'; $clip.Controls.Add($snapV); $snapV.BringToFront(); $flow.AttachView($snapV)
 
+    # Vaheleht ribal
+    $i = $TabBtns.Count
+    $shared = if ($group) { @($TabBtns | Where-Object { $_.Group -eq $group })[0] } else { $null }
+    if ($shared) {
+        $script:TabBtns += @{ Label = $shared.Label; Page = $flow; Title = $title; Built = $false; After = $after; Group = $group
+                              Spec = @{ Ids = @($ids); WithHeaders = $withHeaders; Placing = $placing; Hint = $hintText; Flat = $flat } }
+        if ($eager) { Fill-TabPage $TabBtns[-1] }
+        return
+    }
+    $lbl = New-Object Windows.Forms.Label
+    $lbl.Text = $(if ($group) { $group } else { $title }); if ($Deco) { $lbl.Text = $lbl.Text.ToUpper() }; $lbl.AutoSize = $true; $lbl.Cursor = 'Hand'; $lbl.Font = $FontTab; $lbl.BackColor = 'Transparent'
+    $x = 24; foreach ($tb in $TabBtns) { $x = [Math]::Max($x, $tb.Label.Right + 28) }
+    if ($script:PlusLbl) { $x = [Math]::Max($x, $script:PlusLbl.Right + 22) }   # "+" järel tuleb New
+    $lbl.Location = New-Object Drawing.Point($x, $(if ($Deco) { 9 } else { 13 }))
+    if ($Deco) { $lbl.Padding = New-Object Windows.Forms.Padding(0, 4, 0, 0) }   # ruum Õ kriipsule
+    $lbl.Tag = $i
+    $lbl.Add_Click({
+        $k = $this.Tag
+        # rühma silt: viimati vaadatud leht
+        $grp = $TabBtns[$k].Group   # (mitte $g: PowerShell ei erista suurtähti, $g varjaks teema $G)
+        if ($grp -and $GroupLast[$grp]) { for ($j = 0; $j -lt $TabBtns.Count; $j++) { if ($TabBtns[$j].Group -eq $grp -and $TabBtns[$j].Title -eq $GroupLast[$grp]) { $k = $j } } }
+        Show-Tab $k $false
+    })
+    $lbl.Add_MouseEnter({ if (-not [object]::ReferenceEquals($TabBtns[$script:CurTab].Label, $this)) { $this.ForeColor = $G::TabHover } })
+    $lbl.Add_MouseLeave({ if (-not [object]::ReferenceEquals($TabBtns[$script:CurTab].Label, $this)) { $this.ForeColor = $(if ($this.AccessibleDescription -eq 'new') { $G::TabNew } else { $G::TabIdle }) } })
+    $tabBar.Controls.Add($lbl)
+    $t = @{ Label = $lbl; Page = $flow; Title = $title; Built = $false; After = $after; Group = $group
+            Spec = @{ Ids = @($ids); WithHeaders = $withHeaders; Placing = $placing; Hint = $hintText; Flat = $flat } }
+    $script:TabBtns += $t
+    if ($eager) { Fill-TabPage $t }
+}
+
+function Fill-TabPage($t) {
+    if ($t.Built) { return }
+    $t.Built = $true
+    $title = $t.Title; $flow = $t.Page; $sp = $t.Spec
+    $ids = $sp.Ids; $withHeaders = $sp.WithHeaders; $placing = $sp.Placing; $hintText = $sp.Hint; $flat = $sp.Flat
+    $script:BuildingTab = $title
+    $flow.SuspendLayout()
     # Peatükkide järjekord: skinnid, kaart, muu välimus, helid, kasulikud (sama peatüki sees jääb algne järjekord)
+    $ids = @($ids | Where-Object { $null -ne $_ })   # tühi vaheleht (nt sõbra versioon ilma modideta) andis @($null)
     $pos = @{}; $k = 0; foreach ($id in $ids) { $pos[$id] = $k++ }
-    $ids = @($ids | Sort-Object @{ e = { $c = [array]::IndexOf($CatOrder, $ById[$_].Cat); if ($c -lt 0) { 99 } else { $c } } }, @{ e = { $pos[$_] } })
+    if (-not $flat) { $ids = @($ids | Sort-Object @{ e = { $c = [array]::IndexOf($CatOrder, $ById[$_].Cat); if ($c -lt 0) { 99 } else { $c } } }, @{ e = { $pos[$_] } }) }
     # Peatükkide pealkirjad: "Kõik modid" all alati, mujal siis, kui vahelehel on mitu peatükki
     $cats = @($ids | ForEach-Object { $ById[$_].Cat } | Select-Object -Unique)
-    $showHeaders = $withHeaders -or $cats.Count -gt 1
+    $showHeaders = (-not $flat) -and ($withHeaders -or $cats.Count -gt 1)
 
     # New all: iga mod oma kaardil (paigutus käib modi kaupa)
-    if ($placing) { $rows = New-Object Collections.ArrayList; foreach ($id in $ids) { $r = New-Object Collections.ArrayList; [void]$r.Add($id); [void]$rows.Add($r) } }
+    if ($placing -or $flat) { $rows = New-Object Collections.ArrayList; foreach ($id in $ids) { $r = New-Object Collections.ArrayList; [void]$r.Add($id); [void]$rows.Add($r) } }
     else { $rows = Get-Rows $ids }
     $FullW = 2 * ($CardW + 2 * [DlUi.Card]::Inset)
 
@@ -671,9 +847,24 @@ function Add-Tab($title, $ids, [bool]$withHeaders, [bool]$placing = $false, $hin
     $hint = New-Object Windows.Forms.Label
     $hint.AutoSize = $true; $hint.ForeColor = $G::Text; $hint.Font = $FontHint; $hint.Margin = New-Object Windows.Forms.Padding(14, 8, 0, 0)
     $hint.Text = if ($hintText) { $hintText } elseif ($Portable) { 'One skin per hero can be on at a time. Right-click a mod for more.' } else { 'One skin per hero. Turning one off in Other puts its These skin on.' }
+    if ($t.Group) {
+        # rühma leht: nupud rühma lehtede vahel (see leht esile tõstetud), "Turn all" nuppu ega loendurit pole
+        $hint.Margin = New-Object Windows.Forms.Padding(10, 8, 0, 0)
+        foreach ($gt in @($TabBtns | Where-Object { $_.Group -eq $t.Group })) {
+            $txt = $gt.Title; if ($gt.Title -ne 'By size') { $txt += "  ·  $(@($gt.Spec.Ids).Count)" }
+            $sb = New-Pill $txt ($gt.Title -eq $title); $sb.Font = $FontChip; $sb.FitWidth(14, 34)
+            $sb.Margin = New-Object Windows.Forms.Padding(0, 0, 8, 0); $sb.Tag = $gt.Title
+            if ($gt.Title -ne $title) { $sb.Add_Click({ Show-TabByTitle $this.Tag }) }
+            $top.Controls.Add($sb)
+        }
+        $top.Controls.Add($hint)
+        $flow.Controls.Add($top); $flow.SetFlowBreak($top, $true)
+        $all.Dispose(); $cnt.Dispose()
+    } else {
     $top.Controls.AddRange(@($all, $cnt, $hint))
     $flow.Controls.Add($top)
     $flow.SetFlowBreak($top, $true)
+    }
     $entry = @{ Box = $all; Rows = $rows; Count = $cnt; Full = $false }
     $all.Tag = $entry
     # Kõik sees -> kõik maha; muidu -> kõik peale (kangelase real, kus midagi sees pole, valitakse üks juhuslikult).
@@ -687,7 +878,8 @@ function Add-Tab($title, $ids, [bool]$withHeaders, [bool]$placing = $false, $hin
         }
         Update-Boxes
     })
-    $script:AllBoxes += $entry
+    if (-not $t.Group) { $script:AllBoxes += $entry }
+    if ($script:TabExtras) { & $script:TabExtras $title $top $rows }
 
     $cat = $null; $last = $top; $h = $null
     foreach ($row in $rows) {
@@ -733,21 +925,15 @@ function Add-Tab($title, $ids, [bool]$withHeaders, [bool]$placing = $false, $hin
     }
     $flow.SetFlowBreak($last, $true)
     $pad = New-Object Windows.Forms.Panel; $pad.Size = New-Object Drawing.Size(10, 14); $pad.BackColor = 'Transparent'; $flow.Controls.Add($pad)
+    if ($t.After) { & $t.After $t }
+    Set-GoneTitles @($Cards | Where-Object { $_.Tab -eq $title })
+    $flow.ResumeLayout()
+}
 
-    # Vaheleht ribal
-    $i = $TabBtns.Count
-    $lbl = New-Object Windows.Forms.Label
-    $lbl.Text = $(if ($Deco) { $title.ToUpper() } else { $title }); $lbl.AutoSize = $true; $lbl.Cursor = 'Hand'; $lbl.Font = $FontTab; $lbl.BackColor = 'Transparent'
-    $x = 24; foreach ($tb in $TabBtns) { $x = [Math]::Max($x, $tb.Label.Right + 28) }
-    if ($script:PlusLbl) { $x = [Math]::Max($x, $script:PlusLbl.Right + 22) }   # "+" järel tuleb New
-    $lbl.Location = New-Object Drawing.Point($x, $(if ($Deco) { 9 } else { 13 }))
-    if ($Deco) { $lbl.Padding = New-Object Windows.Forms.Padding(0, 4, 0, 0) }   # ruum Õ kriipsule
-    $lbl.Tag = $i
-    $lbl.Add_Click({ Show-Tab $this.Tag $false })
-    $lbl.Add_MouseEnter({ if ($this.Tag -ne $script:CurTab) { $this.ForeColor = $G::TabHover } })
-    $lbl.Add_MouseLeave({ if ($this.Tag -ne $script:CurTab) { $this.ForeColor = $(if ($this.AccessibleDescription -eq 'new') { $(if ($Deco) { $G::TabLine } else { $G::Brand }) } else { $G::TabIdle }) } })
-    $tabBar.Controls.Add($lbl)
-    $script:TabBtns += @{ Label = $lbl; Page = $flow; Title = $title }
+# lehe maha võtnud modid, mille nupul pole teksti (üks mod kaardil): märge pealkirja
+function Set-GoneTitles($cards) {
+    if (-not ($script:GoneMods -and $script:GoneMods.Count)) { return }
+    foreach ($c in $cards) { foreach ($rid in $c.Row) { if ($script:GoneMods.ContainsKey($rid) -and $Boxes[$rid] -and -not @($Boxes[$rid] | Where-Object { $_.Text })[0] -and $c.Title.Text -notlike '*page removed*') { $c.Title.Text += '  · page removed' } } }
 }
 
 # Alumine riba (enne kaarte, sest Update-Boxes kirjutab $note'i)
@@ -760,8 +946,9 @@ if ($Deco) { $bLine.Visible = $false; $bottom.Add_Paint({ & $DarkBar $_.Graphics
 $save = New-Pill 'Save' $true
 $save.FitWidth(30, 40)
 $bottom.Controls.Add($save)
-# Stiili vahetus (Deadlocki poe stiil <-> eelmine must-kollane); lüliti avaneb uuesti valitud stiiliga.
-$themeBtn = New-Pill $(if ($Deco) { 'Old style' } else { 'Deadlock style' }) $false
+# Stiili vahetus: Deadlocki poe stiil <-> sama tumedana ("dark"); lüliti avaneb uuesti valitud stiiliga.
+# (Vana must-kollane "ajukas" on alles: kui see on seaded.json-is, viib nupp poe stiili.)
+$themeBtn = New-Pill $(if ($Night) { 'Light mode' } elseif ($Deco) { 'Dark mode' } else { 'Deadlock style' }) $false
 $themeBtn.Font = $FontChip; $themeBtn.Dark = $Deco; $themeBtn.FitWidth(12, 26)
 $header.Controls.Add($themeBtn)   # päise paremas ülanurgas
 $themeBtn.Add_Click({
@@ -770,8 +957,9 @@ $themeBtn.Add_Click({
         $r = [Windows.Forms.MessageBox]::Show($form, 'Unsaved changes will be lost when switching style. Continue?', 'Deadlock Mods', 'YesNo', 'Question')
         if ($r -ne 'Yes') { return }
     }
-    $new = if ($Deco) { 'ajukas' } else { 'deadlock' }
+    $new = if ($Deco -and -not $Night) { 'dark' } else { 'deadlock' }
     [IO.File]::WriteAllText($SettingsFile, (@{ Theme = $new } | ConvertTo-Json), (New-Object Text.UTF8Encoding $false))
+    try { $AppMutex.ReleaseMutex(); $AppMutex.Dispose() } catch {}   # uus aken tohib kohe avaneda
     Start-Process powershell.exe -ArgumentList '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', "`"$PSCommandPath`""
     $form.Close()
 })
@@ -782,12 +970,13 @@ $bottom.Controls.Add($note)
 
 # Kõik ette valmis: kaartide ja nuppude pildid joonistatakse kohe ning kõigi vahelehtede aknakomponendid
 # luuakse kohe (mitte alles siis, kui need kerimisel või vahelehte vahetades esimest korda nähtavale tulevad).
-function Initialize-AllPages {
+function Initialize-AllPages { foreach ($t in $TabBtns) { if ($t.Built) { Initialize-Page $t } }; foreach ($id in @($Boxes.Keys)) { foreach ($b in $Boxes[$id]) { $b.Prewarm() } } }
+function Initialize-Page($t, $chips = @()) {
     $mk = { param($c) [void]$c.Handle; foreach ($ch in $c.Controls) { & $mk $ch } }
-    foreach ($t in $TabBtns) { & $mk $t.Page.Parent }
-    foreach ($c in $Cards) { $c.Card.Prewarm() }
+    & $mk $t.Page.Parent
+    foreach ($c in $Cards) { if ($c.Tab -eq $t.Title) { $c.Card.Prewarm() } }
     # kerimise hetktõmmised tehakse taustal valmis (SmoothFlow.PrewarmTick)
-    foreach ($id in @($Boxes.Keys)) { foreach ($b in $Boxes[$id]) { $b.Prewarm() } }
+    foreach ($b in $chips) { $b.Prewarm() }
 }
 
 function Build-Tabs {
@@ -798,6 +987,7 @@ function Build-Tabs {
     }
     if ($script:PlusLbl) { $tabBar.Controls.Remove($script:PlusLbl); $script:PlusLbl.Dispose(); $script:PlusLbl = $null }
     $script:TabBtns = @(); $script:Cards = @(); $script:AllBoxes = @(); $script:AltChips = @(); $Boxes.Clear()
+    $script:InBuildTabs = $true
     $script:SkinTab = @($SkinTab | Where-Object { $ById.ContainsKey($_) })
     $script:NewIds = @($NewIds | Where-Object { $ById.ContainsKey($_) })
 
@@ -812,7 +1002,7 @@ function Build-Tabs {
     # Kasutaja vahelehed
     foreach ($name in @($CustomTabs.Keys)) {
         $CustomTabs[$name] = @($CustomTabs[$name] | Where-Object { $ById.ContainsKey($_) })
-        Add-Tab $name @($CustomTabs[$name] | Where-Object { -not $ById[$_].Parent }) $false $false 'Your own tab: right-click a mod -> Add to tab.'
+        Add-Tab $name @($CustomTabs[$name] | Where-Object { -not $ById[$_].Parent }) $false $false 'Your own tab: right-click a mod -> Add to tab.' $false $true
         $TabBtns[-1].Custom = $true
         $TabBtns[-1].Label.AccessibleName = $name          # vahelehe paremklõpsu menüü jaoks
         $TabBtns[-1].Label.ContextMenuStrip = $TabMenu
@@ -820,6 +1010,26 @@ function Build-Tabs {
         $bulk.Margin = New-Object Windows.Forms.Padding(0, 0, 12, 0); $bulk.Tag = $name
         $bulk.Add_Click({ Set-SelectMode 'tab' $this.Tag })   # klõpsa modidel, siis "Save tab"
         $topRow = $TabBtns[-1].Page.Controls[0]; $topRow.Controls.Add($bulk); $topRow.Controls.SetChildIndex($bulk, 0)
+    }
+    # Ilma lingita modid (lingi lisamine: paremklõps -> Source & updates…)
+    if (-not $Portable -and (Get-Command Get-Sources -ErrorAction SilentlyContinue)) {
+        $srcAll = Get-Sources
+        $noLink = @($main | Where-Object { -not $srcAll.ContainsKey($_.Id) } | ForEach-Object { $_.Id })
+        if ($noLink.Count) { Add-Tab 'No link' $noLink $false $false 'Right-click a mod -> Source and updates…' $false $false $null 'Lists' }
+    }
+    # Ilma pildita modid (peidetud pildiga modid jäävad välja)
+    if (-not $Portable) {
+        $noPic = @($main | Where-Object { -not (Test-OtherPicHidden $_.Id) -and -not (Test-Path -LiteralPath (Join-Path $ModPicDir "$($_.Id).png")) } | ForEach-Object { $_.Id })
+        if ($noPic.Count) { Add-Tab 'No picture' $noPic $false $false 'Right-click a mod -> Picture…' $false $false $null 'Lists' }
+    }
+    # Suuruse järgi (suurim üleval; mod koos oma altidega). Info: paremklõps -> Info… (info.ps1)
+    if (-not $Portable -and (Get-Command Get-ModTotalSize -ErrorAction SilentlyContinue)) {
+        $sizes = @{}; $total = [long]0
+        foreach ($x in $main) { $sizes[$x.Id] = Get-ModTotalSize $x.Id; $total += $sizes[$x.Id] }
+        $bySize = @($main | Sort-Object @{ e = { $sizes[$_.Id] }; Descending = $true } | ForEach-Object { $_.Id })
+        Add-Tab 'By size' $bySize $false $false "Biggest first, all together $(Format-Bytes $total). Right-click -> Info…" $true $false {
+            param($t) foreach ($c in @($Cards | Where-Object { $_.Tab -eq 'By size' })) { $c.Title.Text = "$($c.Title.Text)  ·  $(Format-Bytes $t.Sizes[$c.Row[0]])" } } 'Lists'
+        $TabBtns[-1].Sizes = $sizes
     }
     Add-PlusTab
     $newCards = @($NewIds | Where-Object { -not $ById[$_].Parent })
@@ -829,9 +1039,10 @@ function Build-Tabs {
     if (Get-Command Add-PartsTab -ErrorAction SilentlyContinue) { Add-PartsTab }   # modidest eemaldatud osad (osad.ps1)
     $i = 0
     for ($j = 0; $j -lt $TabBtns.Count; $j++) { if ($TabBtns[$j].Title -eq $keep -or ($keep -like 'New (*' -and $TabBtns[$j].Title -like 'New (*') -or ($keep -like 'Removed parts*' -and $TabBtns[$j].Title -like 'Removed parts*')) { $i = $j } }
+    Show-Tab $i $true          # ehitab selle vahelehe kaardid (teised alles avamisel)
+    $script:InBuildTabs = $false
     Update-Boxes
     Apply-Search
-    Show-Tab $i $true
     Initialize-AllPages
 }
 
@@ -871,6 +1082,8 @@ $content.BringToFront()
 function Place-Right {
     $save.Location = New-Object Drawing.Point(($bottom.ClientSize.Width - $save.Width - 24), 12)
     if ($themeBtn) { $themeBtn.Location = New-Object Drawing.Point(($header.ClientSize.Width - $themeBtn.Width - 24), 8) }   # päise paremas ülanurgas
+    # ⚡ Optimize: ülemises reas stiilinupu kõrval (alumises reas ei mahu kitsas aknas, läks logo peale)
+    if ($optBtn) { $optBtn.Height = $(if ($themeBtn) { $themeBtn.Height } else { 28 }); $optBtn.Location = New-Object Drawing.Point($(if ($themeBtn) { $themeBtn.Left - $optBtn.Width - 8 } else { $header.ClientSize.Width - $optBtn.Width - 24 }), 8); $optBtn.BringToFront() }
     # alumine teade ei tohi nuppude alla minna: murrab vajadusel kahele reale
     if ($delAllBtn -and $delAllBtn.Visible) { $delAllBtn.Location = New-Object Drawing.Point(($save.Left - $delAllBtn.Width - 12), 16) }
     if ($selAllBtn -and $selAllBtn.Visible) { $selAllBtn.Location = New-Object Drawing.Point(($delAllBtn.Left - $selAllBtn.Width - 8), 16) }
@@ -907,8 +1120,12 @@ $form.Add_KeyDown({
 . (Join-Path $PSScriptRoot 'osad.ps1')
 . (Join-Path $PSScriptRoot 'uuendused.ps1')
 . (Join-Path $PSScriptRoot 'pildid.ps1')
+. (Join-Path $PSScriptRoot 'info.ps1')
+. (Join-Path $PSScriptRoot 'optimize.ps1')
 # laikide meeldetuletus: ainult sinu versioonis (jagatavas seda faili pole)
 $lk = Join-Path $PSScriptRoot 'meeldimised.ps1'; if (Test-Path -LiteralPath $lk) { . $lk }
+# sinu enda lisad (Other: "n" nupp, kangelaste pildid): ainult sinu versioonis
+$mn = Join-Path $PSScriptRoot 'minu.ps1'; if (-not $Portable -and (Test-Path -LiteralPath $mn)) { . $mn }
 Build-Tabs
 
 function Update-Status {
@@ -959,10 +1176,12 @@ $form.Add_FormClosing({
 # Salvestab modid mängu. Tagastab $true, kui õnnestus.
 function Save-Changes {
     if (-not (Test-GameClosed)) { return $false }
+    if (-not (Confirm-UiConflicts)) { return $false }   # kontroll.ps1: kaks modi jagavad ekraanifaile -> ekraan läheb segi
     try {
         # Enne välja, siis sisse, et sama kangelase kaks skinni korraga sees poleks.
         foreach ($m in $Mods) { if (-not $State[$m.Id]) { Set-Files $m.Files $false } }
         foreach ($m in $Mods) { if ($State[$m.Id]) { Set-Files $m.Files $true } }
+        if ($script:AfterSave) { try { & $script:AfterSave } catch {} }   # nt hoiatus raskete taustaprogrammide kohta (minu.ps1)
         return $true
     } catch {
         [Windows.Forms.MessageBox]::Show($form, "Saving failed:`n`n$($_.Exception.Message)`n`nIf a file is locked, close Deadlock and try again.", 'Deadlock Mods', 'OK', 'Error') | Out-Null
@@ -992,4 +1211,26 @@ if ($env:DLTOGGLE_SHOT) {
         $form.Close()
     })
 }
+# Laadimise aken kinni, kui põhiaken on ekraanil; teine käivitus -> see aken (või avatud dialoog) ette
+$form.Add_Shown({ Close-Splash; $this.Activate() })
+$OnceTimer = New-Object Windows.Forms.Timer; $OnceTimer.Interval = 300
+$OnceTimer.Add_Tick({
+    if (-not $ShowEvent.WaitOne(0)) { return }
+    if ($form.WindowState -eq 'Minimized') { $form.WindowState = 'Normal' }
+    $top = $form; foreach ($w in [Windows.Forms.Application]::OpenForms) { if ($w.Visible -and $w.Modal) { $top = $w } }
+    $top.TopMost = $true; $top.Activate(); $top.TopMost = $false
+})
+$OnceTimer.Start()
+# Teised vahelehed ehitatakse taustal valmis, kui kasutaja parasjagu midagi ei tee (üks vaheleht korraga, ~1 s),
+# siis on vahetus kohe kiire. Kui hiir/klaviatuur liigub, ootab.
+$PrebuildTimer = New-Object Windows.Forms.Timer; $PrebuildTimer.Interval = 700
+$PrebuildTimer.Add_Tick({
+    $next = $null; for ($j = 0; $j -lt $TabBtns.Count; $j++) { if (-not $TabBtns[$j].Built) { $next = $j; break } }
+    if ($null -eq $next) { return }
+    if ([DlToggle.Native]::IdleMs() -lt 1500 -or [Windows.Forms.Form]::ActiveForm -and [Windows.Forms.Form]::ActiveForm -ne $form) { return }
+    $this.Stop()
+    try { Prebuild-Tab $next } finally { $this.Start() }
+})
+$form.Add_Shown({ $PrebuildTimer.Start() })
 [void]$form.ShowDialog()
+Close-Splash

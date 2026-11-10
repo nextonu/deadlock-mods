@@ -237,7 +237,7 @@ function Test-NewerSame($old, $new) {
 
 # Lehe faili roll: main / alt / addon (nimi ennekõike, siis suurus ja kirjeldus)
 $AltRx = '\balt\b|alternat|variant|without|\bno[ _\-]|\bnon[ _\-]|colou?r|recolou?r|classic|\bsfw\b|\blite\b|model[ _\-]?only|only[ _\-]?model'
-$AddonRx = 'add[ _\-]?on|extra|optional|bonus|voice|\bvo\b|\bvls\b|lines|sound|sfx|music|icon|portrait|\bhud\b|bike|weapon|\bgun\b|\bprop|effect|particle|\bvfx\b|\bpet\b|oily|accessor'
+$AddonRx = 'add[ _\-]?on|extra|optional|bonus|voice|\bvo\b|\bvls\b|lines|sound|sfx|music|icon|portrait|\bhud\b|bike|weapon|\bgun\b|\bprop|effect|particle|\bvfx\b|\bpet\b|accessor'
 function Get-RoleGuess($f, $cur) {
     $cur = @($cur | Where-Object { $_ })
     if ($cur.Count -le 1 -and -not $f.Archived) { return 'main' }
@@ -499,9 +499,25 @@ function Find-ModPage($m, $names) {
     foreach ($query in $queries) {
         foreach ($r in (Search-Gb $query)) { if (-not $seen["$($r.Model)/$($r.GbId)"]) { $seen["$($r.Model)/$($r.GbId)"] = 1; $cands += , $r } }
     }
+    # kokku kirjutatud nimi ("Helloneighbor" vs lehel "Hello Neighbor"): GameBanana otsib terveid sõnu, seega
+    # jaga pikk sõna kaheks (keskelt alustades) ja otsi uuesti, kuni mõne tulemuse pealkiri ilma tühikuteta sisaldab seda
+    $glued = { param($r) ([string]$r.Name).ToLower() -replace '[^a-z0-9]', '' }
+    foreach ($t in @($distinct | Where-Object { $_.Length -ge 8 })) {
+        $t1 = $t
+        if (@($cands | Where-Object { (& $glued $_).Contains($t1) }).Count) { continue }
+        $mid = $t.Length / 2
+        $cuts = @(3..($t.Length - 3) | Sort-Object { [Math]::Abs($_ - $mid) } | Select-Object -First 8)
+        foreach ($k in $cuts) {
+            $query = (@($distinct | Where-Object { $_ -ne $t1 }) + "$($t.Substring(0, $k)) $($t.Substring($k))") -join ' '
+            $new = Search-Gb $query   # (ilma @(): Search-Gb tagastab massiivi ühe objektina)
+            foreach ($r in $new) { if (-not $seen["$($r.Model)/$($r.GbId)"]) { $seen["$($r.Model)/$($r.GbId)"] = 1; $cands += , $r } }
+            if (@($new | Where-Object { (& $glued $_).Contains($t1) }).Count) { break }
+            Start-Sleep -Milliseconds 80
+        }
+    }
     $tokMatch = { param($a, $b) $a -eq $b -or ($a.Length -ge 4 -and $b.Contains($a)) -or ($b.Length -ge 4 -and $a.Contains($b)) }
     foreach ($r in $cands) {
-        $title = @(Get-NameTokens $r.Name)
+        $title = Get-NameTokens $r.Name   # (ilma @(): muidu massiiv massiivis ja osaline sõna ei sobinud kunagi)
         $hitD = @($distinct | Where-Object { $d1 = $_; @($title | Where-Object { & $tokMatch $d1 $_ }).Count }).Count
         $heroHit = [bool](@($heroT | Where-Object { $h1 = $_; @($title | Where-Object { & $tokMatch $h1 $_ }).Count }).Count) -or ($r.SubCat -and $hero -and $r.SubCat -like "*$hero*")
         $r.Score = 3 * $hitD + $(if ($heroHit) { 2 } else { 0 }) + $(if ($r.Model -eq 'Mod') { 0.2 } else { 0 })
@@ -523,6 +539,27 @@ function Find-ModPage($m, $names) {
     return @{ Info = $null; Sure = $false; Likely = $false; Cands = $cands }
 }
 # ---------- Aken: modi allikas ----------
+# Modid, mille GameBanana lehe autor on maha võtnud (kadunud.json): id -> @{ Url; Date }.
+# Märgitakse Updatesis ja "Source & updates" aknas (ka siis, kui kleebid ise lingi); leht tagasi -> märge kaob.
+$GoneFile = Join-Path $PSScriptRoot 'kadunud.json'
+function Get-GoneMods {
+    $h = @{}
+    if (Test-Path -LiteralPath $GoneFile) { try { $j = [IO.File]::ReadAllText($GoneFile) | ConvertFrom-Json; foreach ($p in $j.PSObject.Properties) { $h[$p.Name] = $p.Value } } catch {} }
+    return $h
+}
+function Save-GoneMods($h) {
+    $o = [ordered]@{}; foreach ($k in ($h.Keys | Sort-Object)) { $o[$k] = $h[$k] }
+    [IO.File]::WriteAllText($GoneFile, (ConvertTo-Json $o -Depth 3), (New-Object Text.UTF8Encoding $false))
+    $script:GoneMods = $h
+}
+function Set-PageGone($id, $url, [bool]$gone) {
+    $h = Get-GoneMods
+    if ($gone) { if ($h.ContainsKey($id)) { return }; $h[$id] = [ordered]@{ Url = $url; Date = (Get-Date -Format 'yyyy-MM-dd') } }
+    else { if (-not $h.ContainsKey($id)) { return }; $h.Remove($id) }
+    Save-GoneMods $h; $script:GoneChanged = $true
+}
+$GoneMods = Get-GoneMods
+
 function Show-ModSource($id) {
     $m0 = $ById[$id]; if (-not $m0) { return }
     $main = if ($m0.Parent -and $ById[$m0.Parent]) { $ById[$m0.Parent] } else { $m0 }
@@ -532,7 +569,7 @@ function Show-ModSource($id) {
 
     $d = New-Object Windows.Forms.Form
     $d.Text = "Source & updates: $(Get-BaseName $main)"; $d.BackColor = $DlgBg; $d.ForeColor = $DlgText; $d.Font = $FontUi
-    $d.FormBorderStyle = 'Sizable'; $d.MinimizeBox = $false; $d.StartPosition = 'CenterParent'
+    $d.FormBorderStyle = 'Sizable'; Enable-DialogMinimize $d; $d.StartPosition = 'CenterParent'
     $d.ClientSize = New-Object Drawing.Size(860, 560); $d.MinimumSize = New-Object Drawing.Size(700, 420)
     $d.Add_HandleCreated({ $v = 1; [void][DlToggle.Native]::DwmSetWindowAttribute($this.Handle, 20, [ref]$v, 4) })
     $lab = New-Object Windows.Forms.Label
@@ -581,14 +618,15 @@ function Show-ModSource($id) {
         param($w)
         $cb = New-Object Windows.Forms.ComboBox
         $cb.DropDownStyle = 'DropDownList'; $cb.FlatStyle = 'Flat'; $cb.BackColor = $G::Raised; $cb.ForeColor = $G::Bright; $cb.Width = $w
-        $cb.Add_HandleCreated({ [void][DlToggle.Native]::SetWindowTheme($this.Handle, $(if ($Deco) { 'Explorer' } else { 'DarkMode_CFD' }), $null) })
+        $cb.Add_HandleCreated({ [void][DlToggle.Native]::SetWindowTheme($this.Handle, $(if ($Deco -and -not $Night) { 'Explorer' } else { 'DarkMode_CFD' }), $null) })
         $cb
     }
     $fill = {
         param($inf)
         $st.Info = $inf
         $panel.Controls.Clear(); $lv.Items.Clear(); $st.Rows = @()
-        if ($inf.Gone) { $info.Text = "This page was removed or hidden by the author ($($inf.Url))."; $save.Enabled = $false; $saveChk.Enabled = $false; return }
+        if ($inf.Gone) { Set-PageGone $id $inf.Url $true; $info.Text = "This page was removed or hidden by the author ($($inf.Url)). The mod is now marked 'page removed'."; $save.Enabled = $false; $saveChk.Enabled = $false; return }
+        Set-PageGone $id $inf.Url $false
         $cur = @($inf.Cur); $arc = @($inf.Arch)
         $info.Text = "$($inf.Name)   ·   updated $(Format-GbDate $inf.Updated)   ·   $($cur.Count) file(s)" + $(if ($arc.Count) { " + $($arc.Count) old (archived)" } else { '' })
         $url.Text = $inf.Url
@@ -763,7 +801,7 @@ function Show-ModUpdates($onlyIds) {
                     $row.SubItems[3].Text = "Probably newer - file name changed. Open the page to check."
                 }
                 $row.ToolTipText = "$($x.New.Desc)"
-                $row.ForeColor = [DlUi.G]::Hex('#1F5F24')
+                $row.ForeColor = [DlUi.G]::Fg('#1F5F24')
                 $st.Updates++
             }
             'new' {
@@ -772,24 +810,26 @@ function Show-ModUpdates($onlyIds) {
                 $row.SubItems[2].Text = "$($x.New.Name)  ($(Format-GbDate $x.New.Date), $(Format-Size $x.New.Size))" + $(if ($x.New.Desc) { " - $($x.New.Desc)" } else { '' })
                 $row.SubItems[3].Text = if ($x.Role -eq 'addon') { 'Extra for this mod. Tick to add.' } else { 'Another version (one on at a time). Tick to add.' }
                 $row.ToolTipText = $x.New.Desc
-                $row.ForeColor = [DlUi.G]::Hex('#6E4A08')
+                $row.ForeColor = [DlUi.G]::Fg('#6E4A08')
             }
             'nosucc' {
                 $row.Text = '! Missing'; $row.Group = $grp['problem']
                 $row.SubItems[2].Text = "(your file $($x.Link.Name) was removed)"
                 $row.SubItems[3].Text = 'Your file was removed. Right-click -> Source & updates to pick.'
-                $row.ForeColor = [DlUi.G]::Hex('#8E2A20')
+                $row.ForeColor = [DlUi.G]::Fg('#8E2A20')
             }
             'gone' {
+                Set-PageGone $x.Id $x.Info.Url $true
                 $row.Text = '✕ Page gone'; $row.Group = $grp['problem']; $row.SubItems[2].Text = $x.Info.Url
                 $row.SubItems[3].Text = 'Page removed. Your mod still works, no updates.'
-                $row.ForeColor = [DlUi.G]::Hex('#8E2A20')
+                $row.ForeColor = [DlUi.G]::Fg('#8E2A20')
             }
             'error' {
                 $row.Text = '! Error'; $row.Group = $grp['problem']; $row.SubItems[2].Text = $x.Url
-                $row.SubItems[3].Text = "Could not check: $($x.Err)"; $row.ForeColor = [DlUi.G]::Hex('#8E2A20')
+                $row.SubItems[3].Text = "Could not check: $($x.Err)"; $row.ForeColor = [DlUi.G]::Fg('#8E2A20')
             }
             default {
+                Set-PageGone $x.Id $null $false
                 $row.Text = '✓ Up to date'; $row.Group = $grp['ok']; $row.SubItems[2].Text = "$($x.Info.Name)"
                 $row.SubItems[3].Text = "Newest already (page changed $(Format-GbDate $x.Info.Updated))."; $row.ForeColor = [DlUi.G]::Text
             }
@@ -866,7 +906,7 @@ function Show-ModUpdates($onlyIds) {
                     $res = Invoke-SourceAdd $x $status
                     $row.Text = '✓ Added'; $row.SubItems[3].Text = "Added as '$($res.Name)' (in New, off)"
                 }
-                $row.Checked = $false; $x.Done = $true; $row.ForeColor = [DlUi.G]::Hex('#1F5F24'); $row.Group = $grp['done']; $ok++; $st.Changed = $true
+                $row.Checked = $false; $x.Done = $true; $row.ForeColor = [DlUi.G]::Fg('#1F5F24'); $row.Group = $grp['done']; $ok++; $st.Changed = $true
             } catch {
                 $row.Text = '✕ Failed'; $row.SubItems[3].Text = "$_"; $row.ToolTipText = "$_"; $bad++
             }
@@ -890,6 +930,7 @@ function Show-ModUpdates($onlyIds) {
         $left = @($lv.Items | Where-Object { $_.Tag.Kind -eq 'update' -and -not $_.Tag.Done }).Count
         $d.Dispose()
         $form.Cursor = 'Default'
+        if ($script:GoneChanged) { $script:GoneChanged = $false; Build-Tabs }
         $script:AddBusy = $false; $updBtn.Enabled = $true
     }
     if (-not $onlyIds) { Set-UpdateCount $left }
@@ -947,7 +988,7 @@ if (-not $env:DLTEST_NOUPD) { $form.Add_Shown({ Start-BackgroundUpdateCheck }) }
 # ---------- Paremklõpsu menüü ----------
 $miSource = New-Object Windows.Forms.ToolStripMenuItem 'Source & updates…'
 $ModMenu.Items.Insert($ModMenu.Items.IndexOf($miParts) + 1, $miSource)
-$miSource.Add_Click({ if ($script:MenuId) { Show-ModSource $script:MenuId } })
+$miSource.Add_Click({ if ($script:MenuId) { $had = (Get-Sources).ContainsKey($script:MenuId); $script:GoneChanged = $false; Show-ModSource $script:MenuId; if ($script:GoneChanged -or $had -ne (Get-Sources).ContainsKey($script:MenuId)) { $script:GoneChanged = $false; Build-Tabs } } })
 $ModMenu.Add_Opening({
     if (-not $script:MenuId) { return }
     $a = Get-Sources; $m = $ById[$script:MenuId]
@@ -981,7 +1022,7 @@ function Show-PickFiles($inf) {
     $cur = @($inf.Cur)
     $d = New-Object Windows.Forms.Form
     $d.Text = "Download: $($inf.Name)"; $d.BackColor = $DlgBg; $d.ForeColor = $DlgText; $d.Font = $FontUi
-    $d.FormBorderStyle = 'Sizable'; $d.MinimizeBox = $false; $d.StartPosition = 'CenterParent'
+    $d.FormBorderStyle = 'Sizable'; Enable-DialogMinimize $d; $d.StartPosition = 'CenterParent'
     $d.ClientSize = New-Object Drawing.Size(760, 360); $d.MinimumSize = New-Object Drawing.Size(520, 260)
     $d.Add_HandleCreated({ $v = 1; [void][DlToggle.Native]::DwmSetWindowAttribute($this.Handle, 20, [ref]$v, 4) })
     $lab = New-Object Windows.Forms.Label
