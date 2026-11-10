@@ -180,9 +180,6 @@ function Show-PictureFor($id, $row = $null) {
     Show-PictureEditor $id $row $img
 }
 
-# Peidetud pildiga modid (PlainPicTabs, vaikimisi tühi):
-# pildiaken ei näita praegust pilti ega GameBanana lehe pilte
-function Test-PicHidden($id) { Test-OtherPicHidden $id }   # (DeadlockModToggle.ps1)
 
 # ---------- Aken: pildi valik ja koht ----------
 function Show-PictureEditor($id, $row, $startImg = $null) {
@@ -202,7 +199,7 @@ function Show-PictureEditor($id, $row, $startImg = $null) {
     $forBox.DropDownStyle = 'DropDownList'; $forBox.FlatStyle = 'Flat'; $forBox.BackColor = $G::Raised; $forBox.ForeColor = $G::Bright; $forBox.Width = 420
     $forBox.Add_HandleCreated({ [void][DlToggle.Native]::SetWindowTheme($this.Handle, $(if ($Deco -and -not $Night) { 'Explorer' } else { 'DarkMode_CFD' }), $null) })
     $forBox.Location = New-Object Drawing.Point(100, 74)
-    foreach ($t in $targets) { [void]$forBox.Items.Add($t.Text + $(if ((Get-ModPicture $t.Id) -and -not (Test-PicHidden $t.Id)) { '   ✓' } else { '' })) }
+    foreach ($t in $targets) { [void]$forBox.Items.Add($t.Text + $(if ((Get-ModPicture $t.Id)) { '   ✓' } else { '' })) }
 
     $lab = New-Object Windows.Forms.Label; $lab.AutoSize = $true; $lab.ForeColor = $DlgText; $lab.Location = New-Object Drawing.Point(16, 110)
     $thumbs = New-Object Windows.Forms.FlowLayoutPanel
@@ -220,7 +217,7 @@ function Show-PictureEditor($id, $row, $startImg = $null) {
     $pvLab.Location = New-Object Drawing.Point(626, 484); $pvLab.Text = 'Drag = move,  mouse wheel = zoom'
     $pv.Add_Paint({
         $gx = $_.Graphics
-        if (-not $st.View) { [Windows.Forms.TextRenderer]::DrawText($gx, $(if ($st.Hidden) { 'Hidden' } else { 'No picture yet' }), $FontUi, $pv.ClientRectangle, $G::Text, [Windows.Forms.TextFormatFlags]'HorizontalCenter, VerticalCenter'); return }
+        if (-not $st.View) { [Windows.Forms.TextRenderer]::DrawText($gx, 'No picture yet', $FontUi, $pv.ClientRectangle, $G::Text, [Windows.Forms.TextFormatFlags]'HorizontalCenter, VerticalCenter'); return }
         $bmp = Get-CroppedPicture $st.View $st.Cx $st.Cy $st.Zoom $pv.Width $pv.Height
         $gx.DrawImageUnscaled($bmp, 0, 0); $bmp.Dispose()
     })
@@ -293,14 +290,6 @@ function Show-PictureEditor($id, $row, $startImg = $null) {
     $loadTarget = {
         $cur = Get-ModPicture $st.Id
         if ($st.Img) { $st.Img.Dispose(); $st.Img = $null }; if ($st.View) { $st.View.Dispose(); $st.View = $null }
-        $st.Hidden = Test-PicHidden $st.Id; $bAuto.Enabled = -not $st.Hidden
-        if ($st.Hidden) {
-            # peidus: ei praegust pilti ega GameBanana galeriid (fail / kleebi / eemalda töötavad)
-            foreach ($t in $st.Thumbs) { foreach ($c in $t.Controls) { if ($c.Image) { $c.Image.Dispose() } } }
-            $thumbs.Controls.Clear(); $st.Thumbs = @(); $st.Gb = $null; $st.GbKey = '-'
-            $lab.Text = 'Pictures are hidden here. Use "Choose file…" or "Paste copied picture".'
-            $st.Changed = $false; $bDel.Enabled = [bool]$cur; $pv.Invalidate(); return
-        }
         $orig = if ($cur) { Get-PictureOrig $st.Id } else { $null }
         if ($orig) { $st.Img = $orig.Img; $st.View = Get-SmallCopy $st.Img; $st.Cx = $orig.Cx; $st.Cy = $orig.Cy; $st.Zoom = $orig.Zoom; & $clamp }
         elseif ($cur) { $st.Img = New-Object Drawing.Bitmap $cur; $st.View = Get-SmallCopy $st.Img; $st.Cx = 0.5; $st.Cy = 0.5; $st.Zoom = 1.0 }
@@ -319,7 +308,6 @@ function Show-PictureEditor($id, $row, $startImg = $null) {
         $st.Id = $nid; $st.Loaded = $true; & $loadTarget
     })
     $bAuto.Add_Click({
-        if ($st.Hidden) { return }
         if ($st.Gb) { $best = Get-BestGbImage $st.Id $st.Gb; if ($best) { & $pickGb $best; return } }
         if ($st.Img) { $c = [DlUi.AutoCrop]::Find($st.Img, $PicAspect, 1.0); $st.Zoom = 1.0; $st.Cx = $c.X; $st.Cy = $c.Y; & $clamp; $st.Changed = $true; $pv.Invalidate() }
     })

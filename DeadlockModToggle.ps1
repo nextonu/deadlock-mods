@@ -382,28 +382,16 @@ function Get-CardShownMod($row) {
     return $main
 }
 # Kaardi pilt: sees oleva modi (või tema sees oleva aldi) pilt; ühe modiga kaardil tema pilt; muidu kangelase pilt; muidu mõne modi pilt
-$PlainPicTabs = @()   # vahelehed, kus kaardil on kangelase pilt, mitte modi oma (minu.ps1)
-$TabExtras = $null    # lisanupud vahelehe "Turn all" ritta (minu.ps1)
 $BuildingTab = $null
-$AfterUpdate = $null   # kutsutakse Update-Boxes'i lõpus (minu.ps1)
-$AfterSave = $null     # kutsutakse pärast õnnestunud salvestamist (minu.ps1)
 function Get-CardPicture($row, $heroImg, $tab = $null) {
-    if ($tab -and ($script:PlainPicTabs -contains $tab)) { return $heroImg }   # kangelaseta modil (kaart jms) pilti pole
-    # PlainPicTabs vahelehe modide pildid on peidus ka teistel vahelehtedel (lisafail võib selle seada)
     $id = Get-CardShownMod $row
-    if ($id) { $p = Get-ShownModPicture $id; if ($p) { return $p } }
-    foreach ($id in $row) { if ($State[$id]) { $p = Get-ShownModPicture $id; if ($p) { return $p } } }
-    if (@($row).Count -eq 1) { $p = Get-ShownModPicture $row[0]; if ($p) { return $p } }
+    if ($id) { $p = Get-ModPicture $id; if ($p) { return $p } }
+    foreach ($id in $row) { if ($State[$id]) { $p = Get-ModPicture $id; if ($p) { return $p } } }
+    if (@($row).Count -eq 1) { $p = Get-ModPicture $row[0]; if ($p) { return $p } }
     if ($heroImg) { return $heroImg }
-    foreach ($id in $row) { $p = Get-ShownModPicture $id; if ($p) { return $p } }
+    foreach ($id in $row) { $p = Get-ModPicture $id; if ($p) { return $p } }
     return $null
 }
-function Test-OtherPicHidden($id) {
-    if ($script:PlainPicTabs -notcontains 'Other') { return $false }
-    $m = $ById[$id]; $main = if ($m -and $m.Parent) { $m.Parent } else { $id }
-    return ($SkinTab -contains $main -or $SkinTab -contains $id)
-}
-function Get-ShownModPicture($id) { if (Test-OtherPicHidden $id) { return $null }; return (Get-ModPicture $id) }
 # Kangelase nimi kaardile ja pildile: nimes sulgudes, või (lülitist lisatud modidel) Hero võtme järgi.
 function Get-HeroName($mod) {
     if ($mod.Name -match '\(([^)]*)\)') { return $Matches[1] }
@@ -442,7 +430,6 @@ function Update-Boxes {
     if ($diff) { $note.Text = "●  $diff unsaved change" + $(if ($diff -gt 1) { 's' } else { '' }); $note.ForeColor = $G::Brand }
     else { $note.Text = 'Changes reach the game after you press Save and start Deadlock. Don''t want to keep them? Just close the app.'; $note.ForeColor = $G::HeadMuted }
     $script:syncing = $false
-    if ($script:AfterUpdate) { & $script:AfterUpdate }   # nt Otheri "n" nupp (minu.ps1)
 }
 
 function New-Pill($text, [bool]$primary) {
@@ -579,7 +566,6 @@ function Prebuild-Tab($i) {
             $n = 0; foreach ($row in $a.Rows) { if (Test-RowOn $row) { $n++ } }
             $a.Full = ($n -eq $a.Rows.Count); $a.Box.Text = if ($a.Full) { 'Turn all off' } else { 'Turn all on' }; $a.Count.Text = "$n / $($a.Rows.Count) on"
         }
-        if ($script:AfterUpdate) { & $script:AfterUpdate }
         if ($search.Text.Trim()) { Apply-Search }
         if ($script:DeleteMode -and (Get-Command Update-DeleteUi -ErrorAction SilentlyContinue)) { Update-DeleteUi }
         Initialize-Page $TabBtns[$i] $newChips
@@ -879,7 +865,6 @@ function Fill-TabPage($t) {
         Update-Boxes
     })
     if (-not $t.Group) { $script:AllBoxes += $entry }
-    if ($script:TabExtras) { & $script:TabExtras $title $top $rows }
 
     $cat = $null; $last = $top; $h = $null
     foreach ($row in $rows) {
@@ -1019,7 +1004,7 @@ function Build-Tabs {
     }
     # Ilma pildita modid (peidetud pildiga modid jäävad välja)
     if (-not $Portable) {
-        $noPic = @($main | Where-Object { -not (Test-OtherPicHidden $_.Id) -and -not (Test-Path -LiteralPath (Join-Path $ModPicDir "$($_.Id).png")) } | ForEach-Object { $_.Id })
+        $noPic = @($main | Where-Object { -not (Test-Path -LiteralPath (Join-Path $ModPicDir "$($_.Id).png")) } | ForEach-Object { $_.Id })
         if ($noPic.Count) { Add-Tab 'No picture' $noPic $false $false 'Right-click a mod -> Picture…' $false $false $null 'Lists' }
     }
     # Suuruse järgi (suurim üleval; mod koos oma altidega). Info: paremklõps -> Info… (info.ps1)
@@ -1088,7 +1073,6 @@ function Place-Right {
     if ($delAllBtn -and $delAllBtn.Visible) { $delAllBtn.Location = New-Object Drawing.Point(($save.Left - $delAllBtn.Width - 12), 16) }
     if ($selAllBtn -and $selAllBtn.Visible) { $selAllBtn.Location = New-Object Drawing.Point(($delAllBtn.Left - $selAllBtn.Width - 8), 16) }
     $right = if ($selAllBtn -and $selAllBtn.Visible) { $selAllBtn.Left } elseif ($delAllBtn -and $delAllBtn.Visible) { $delAllBtn.Left } else { $save.Left }
-    if ($likeBtn -and $likeBtn.Visible) { $likeBtn.Location = New-Object Drawing.Point(($right - $likeBtn.Width - 10), 16); $right = $likeBtn.Left }   # laigid (meeldimised.ps1)
     $note.MaximumSize = New-Object Drawing.Size([Math]::Max(150, $right - 44), 0)
     $note.Top = [Math]::Max(4, [int](($bottom.ClientSize.Height - $note.Height) / 2))
     # Päise nupud paremalt vasakule: otsing, Add, Delete, Check, Updates. Nupud ei tohi minna logo alla:
@@ -1123,9 +1107,7 @@ $form.Add_KeyDown({
 . (Join-Path $PSScriptRoot 'info.ps1')
 . (Join-Path $PSScriptRoot 'optimize.ps1')
 # laikide meeldetuletus: ainult sinu versioonis (jagatavas seda faili pole)
-$lk = Join-Path $PSScriptRoot 'meeldimised.ps1'; if (Test-Path -LiteralPath $lk) { . $lk }
 # sinu enda lisad (Other: "n" nupp, kangelaste pildid): ainult sinu versioonis
-$mn = Join-Path $PSScriptRoot 'minu.ps1'; if (-not $Portable -and (Test-Path -LiteralPath $mn)) { . $mn }
 Build-Tabs
 
 function Update-Status {
@@ -1181,7 +1163,6 @@ function Save-Changes {
         # Enne välja, siis sisse, et sama kangelase kaks skinni korraga sees poleks.
         foreach ($m in $Mods) { if (-not $State[$m.Id]) { Set-Files $m.Files $false } }
         foreach ($m in $Mods) { if ($State[$m.Id]) { Set-Files $m.Files $true } }
-        if ($script:AfterSave) { try { & $script:AfterSave } catch {} }   # nt hoiatus raskete taustaprogrammide kohta (minu.ps1)
         return $true
     } catch {
         [Windows.Forms.MessageBox]::Show($form, "Saving failed:`n`n$($_.Exception.Message)`n`nIf a file is locked, close Deadlock and try again.", 'Deadlock Mods', 'OK', 'Error') | Out-Null

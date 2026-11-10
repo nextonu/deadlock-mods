@@ -1095,30 +1095,6 @@ namespace DlUi
         }
     }
 
-    // Ümmargune "n" nupp (nagu modi nupu nurgas olev "n"): On = n-versioonid sees. Klõps = Click sündmus.
-    public class NBadge : Control
-    {
-        bool hover;
-        public bool On;
-        public NBadge()
-        {
-            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.SupportsTransparentBackColor, true);
-            BackColor = Color.Transparent; Size = new Size(30, 30); Cursor = Cursors.Hand;
-        }
-        protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
-        protected override void OnMouseLeave(EventArgs e) { hover = false; Invalidate(); base.OnMouseLeave(e); }
-        protected override void OnPaint(PaintEventArgs e)
-        {
-            var g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
-            var br = new RectangleF(2f, 2f, Width - 5f, Height - 5f);
-            Color bf = On ? (hover ? G.BrandHover : G.Brand) : (hover ? G.Hover : G.Raised);
-            using (var b = new SolidBrush(bf)) g.FillEllipse(b, br);
-            using (var pen = new Pen(On ? G.Bg : (hover ? G.Brand : G.LineHover), 1.6f)) g.DrawEllipse(pen, br);
-            using (var f = new Font("Segoe UI", 10f, FontStyle.Bold))
-                TextRenderer.DrawText(g, "n", f, Rectangle.Round(br), On ? G.Ink : (hover ? G.Bright : G.Muted),
-                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
-        }
-    }
 
     // Tavaline nupp (Salvesta, Lülita kõik ...), ümarate nurkadega.
     public class Pill : Control
