@@ -538,6 +538,36 @@ function Find-ModPage($m, $names) {
     }
     return @{ Info = $null; Sure = $false; Likely = $false; Cands = $cands }
 }
+# Failist lisatud modidele allika link automaatselt. Ainult kindel vaste: just see allalaaditud arhiiv on
+# GameBanana lehel (alt/lisa puhul vaadatakse enne ema lehte). Muidu jääb link panemata (paremklõps -> Source).
+function Set-AutoSources($ids) {
+    $src = Get-Sources
+    $todo = @($ids | Where-Object { $_ -and $ById[$_] -and -not $src.ContainsKey($_) })
+    if (-not $todo.Count) { return }
+    $recs = @{}; foreach ($a in @(Get-AddedMods)) { $recs[$a.Id] = $a }
+    $ok = @(); $miss = @()
+    foreach ($id in $todo) {
+        $m = $ById[$id]; $rec = $recs[$id]
+        if (-not $rec -or -not $rec.Source) { $miss += Get-BaseName $m; continue }
+        $names = @{ ([string]$rec.Source).ToLower() = 1 }
+        $note.Text = "Looking for the GameBanana page: $(Get-BaseName $m)…"; $note.ForeColor = $G::Text; $note.Refresh()
+        try {
+            $info = $null
+            $ps = $(if ($m.Parent) { (Get-Sources)[$m.Parent] })
+            if ($ps) { try { $pi = Get-GbInfo $ps.Model $ps.GbId 60; if (@(Get-PageMatches $pi $names).Count) { $info = $pi } } catch {} }
+            if (-not $info) { $r = Find-ModPage $m $names; if ($r.Sure) { $info = $r.Info } }
+            if (-not $info) { $miss += Get-BaseName $m; continue }
+            $rows = @(foreach ($x in (Get-AutoLinks $m $info $names $null @{} $false)) { $x.Mod = $m; if (-not $m.Parent -and $x.Index -eq 0) { $x.Role = 'main' }; $x })
+            Set-ModLinks $info $rows
+            $ok += Get-BaseName $m
+            if (-not $m.Parent -and (Get-Command Save-ModPictureFromGb -ErrorAction SilentlyContinue) -and -not (Get-ModPicture $m.Id)) { try { Save-ModPictureFromGb $m.Id $info; Build-Tabs } catch {} }
+        } catch { $miss += Get-BaseName $m }
+    }
+    if ($ok.Count -and -not $miss.Count) { $note.Text = "✓  Source link added: $($ok -join ', ')"; $note.ForeColor = $G::Hex('#89D185') }
+    elseif ($ok.Count) { $note.Text = "✓  Source link added: $($ok -join ', ')  ·  not found: $($miss -join ', ') (right-click › Source)"; $note.ForeColor = $G::Hex('#89D185') }
+    else { $note.Text = "No GameBanana page found for: $($miss -join ', ') (right-click › Source to add the link)"; $note.ForeColor = $G::Text }
+}
+
 # ---------- Aken: modi allikas ----------
 # Modid, mille GameBanana lehe autor on maha võtnud (kadunud.json): id -> @{ Url; Date }.
 # Märgitakse Updatesis ja "Source & updates" aknas (ka siis, kui kleebid ise lingi); leht tagasi -> märge kaob.
@@ -1104,7 +1134,8 @@ function Add-ModFromLink($text) {
         }
         $before = @(Get-AddedMods | ForEach-Object { $_.Id })
         $form.Cursor = 'Default'; Update-Boxes
-        Add-ModFiles $files
+        $script:LinkAdding = $true
+        try { Add-ModFiles $files } finally { $script:LinkAdding = $false }
         $after = @(Get-AddedMods | Where-Object { $before -notcontains $_.Id })
         # allika link kohe külge (uuenduste kontroll)
         if ($inf) {

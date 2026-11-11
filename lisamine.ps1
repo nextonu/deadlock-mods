@@ -525,8 +525,13 @@ function Add-ModFromFile($file) {
 # Mitu faili: mass add aken, mitu faili -> üks lisamine; üks fail -> tavaline lisamise aken
 function Add-ModFiles($files) {
     $files = @($files | Where-Object { $_ })
+    $before = @(Get-AddedMods | ForEach-Object { $_.Id })
     if ($files.Count -eq 1) { Add-ModFromFile $files[0] }
     elseif ($files.Count -gt 1) { Show-MassAdd $files }
+    # allika link GameBananast automaatselt (uuendused.ps1); lingist lisamine paneb lingi ise
+    if (-not $script:LinkAdding -and (Get-Command Set-AutoSources -ErrorAction SilentlyContinue)) {
+        Set-AutoSources @(Get-AddedMods | Where-Object { $before -notcontains $_.Id } | ForEach-Object { $_.Id })
+    }
 }
 
 function Start-AddMod {
