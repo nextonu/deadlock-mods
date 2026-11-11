@@ -344,7 +344,7 @@ function Show-MassAdd($files) {
             $p = $it.Prep
             $row.Text = $p.Nice
             $row.SubItems[1].Text = $(if ($p.Hero) { $p.Hero.Display } else { '—' })
-            if (-not $it.Parent) { $it.Cat = if ($p.Hero) { 'Skins' } else { 'Visuals' } }
+            if (-not $it.Parent) { $it.Cat = if ($p.Cat) { $p.Cat } elseif ($p.Hero) { 'Skins' } else { 'Visuals' } }
             $row.SubItems[2].Text = $it.Cat
             $s = if ($p.Old) { 'Ready · old camera (no fix)' } elseif ($p.CamFixed) { 'Ready · camera fixed' } else { '✓ Ready' }
             if (@($p.Log | Where-Object { $_ -like 'Outdated copy, removed*' }).Count) { $s += ' · old shared files removed' }
@@ -382,7 +382,7 @@ function Show-MassAdd($files) {
                 $hk = $null; $hn = $null; if ($p.Hero -and -not $par) { $hk = $p.Hero.Key; $hn = $p.Hero.Display }
                 $sty = if ($par) { $(if ($Portable) { 'chip' } else { $it.Style }) } else { $null }
                 $ans = @{ Name = $it.Row.Text.Trim(); Cat = $it.Cat; HeroKey = $hk; HeroName = $hn; Parent = $par; AltStyle = $sty; Where = $it.Dest }
-                if (-not $ans.Cat) { $ans.Cat = if ($p.Hero) { 'Skins' } else { 'Visuals' } }
+                if (-not $ans.Cat) { $ans.Cat = if ($p.Cat) { $p.Cat } elseif ($p.Hero) { 'Skins' } else { 'Visuals' } }
                 try { $r = Install-PreparedMod $p $ans; $done += $r.Name; $it.Prep = $null; $made[$it.Key] = $r.Id }
                 catch { $failed += "$($ans.Name): $($_.Exception.Message)" }
             }

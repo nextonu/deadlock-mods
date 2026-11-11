@@ -244,7 +244,7 @@ function Move-ParentUp($parentId, [int]$count) {
     return , $out
 }
 
-function Show-AddDialog($defaultName, $hero, $log) {
+function Show-AddDialog($defaultName, $hero, $log, $defCat) {
     $d = New-Object Windows.Forms.Form
     $d.Text = 'Add mod'; $d.BackColor = $DlgBg; $d.ForeColor = $DlgText; $d.Font = $FontUi
     $d.FormBorderStyle = 'FixedDialog'; $d.MaximizeBox = $false; Enable-DialogMinimize $d
@@ -274,7 +274,7 @@ function Show-AddDialog($defaultName, $hero, $log) {
     $cat.DropDownStyle = 'DropDownList'; $cat.Add_HandleCreated({ [void][DlToggle.Native]::SetWindowTheme($this.Handle, $(if ($Deco -and -not $Night) { 'Explorer' } else { 'DarkMode_CFD' }), $null) }); $cat.BackColor = $G::Raised; $cat.ForeColor = $G::Bright; $cat.FlatStyle = 'Flat'
     $cat.Location = New-Object Drawing.Point(20, $script:dy); $cat.Width = 240
     [void]$cat.Items.AddRange(@('Skins', 'Map', 'Visuals', 'Sounds & music', 'Utility (recommended)'))
-    $cat.SelectedIndex = if ($hero) { 0 } else { 2 }
+    $cat.SelectedIndex = if ($defCat -and $cat.Items.Contains($defCat)) { $cat.Items.IndexOf($defCat) } elseif ($hero) { 0 } else { 2 }
     $d.Controls.Add($cat); $script:dy += 40
     & $mk 'Alt for an existing mod (overrides its files when on)'
     $par = New-Object Windows.Forms.ComboBox
@@ -355,7 +355,8 @@ function Initialize-ModFile($file, $status) {
     $ext = [IO.Path]::GetExtension($file).ToLower()
     $base = [IO.Path]::GetFileNameWithoutExtension($file) -replace '\.tar$', ''   # x.tar.gz -> x
     $work = Join-Path $ArchiveDir (Get-Date -Format 'yyyy-MM-dd')
-    $prep = @{ File = $file; Ext = $ext; Base = $base; Dir = $null; Files = @(); Hero = $null; Old = $false; CamFixed = $false; Log = (New-Object Collections.ArrayList) }
+    $prep = @{ File = $file; Ext = $ext; Base = $base; Dir = $null; Files = @(); Hero = $null; Cat = 'Visuals'; Old = $false; CamFixed = $false; Log = (New-Object Collections.ArrayList) }
+    $nAll = 0; $nSnd = 0
     try {
         if ($ext -eq '.vpk') {
             $vpks = @(Get-Item -LiteralPath $file)
@@ -385,6 +386,7 @@ function Initialize-ModFile($file, $status) {
             $paths = Get-VpkPaths $v.FullName
             $h = Get-HeroInfo $paths
             if ($h -and -not $prep.Hero) { $prep.Hero = $h }
+            foreach ($q in $paths) { $nAll++; if ($q -match '^(sounds|soundevents)/') { $nSnd++ } }
             $drop = Get-StaleShared $v.FullName $paths $prep.Log
             $src = $v.FullName
             if ($drop.Count) {
@@ -402,6 +404,8 @@ function Initialize-ModFile($file, $status) {
             if ($cam.Failed) { $prep.Old = $true }
             $prep.Files += @{ Src = $src; Tmp = ($src -ne $v.FullName) }
         }
+        # kategooria: kangelase mudel -> Skins; ainult helid (sounds/, soundevents/) -> Sounds & music; muu -> Visuals
+        if ($prep.Hero) { $prep.Cat = 'Skins' } elseif ($nAll -and $nSnd -eq $nAll) { $prep.Cat = 'Sounds & music' }
         if ($prep.Hero) { [void]$prep.Log.Insert(0, "Hero: $($prep.Hero.Display)") } else { [void]$prep.Log.Insert(0, 'No hero model found (sound/UI/other mod).') }
         if ($prep.Old) { [void]$prep.Log.Add('Old camera that could not be fixed automatically - "no camera fix" is added to the name.') }
         $nice = ($base -replace '[_\-]+', ' ' -replace '\b(pak\d+|dir|v\d+(\s\d+)*|[0-9a-f]{5})\b', '' -replace '\s+', ' ').Trim()
@@ -498,7 +502,7 @@ function Add-ModFromFile($file) {
     try {
         $prep = Initialize-ModFile $file
         $form.Cursor = 'Default'; Update-Boxes
-        $ans = Show-AddDialog $prep.Nice $prep.Hero $prep.Log
+        $ans = Show-AddDialog $prep.Nice $prep.Hero $prep.Log $prep.Cat
         if (-not $ans) { return }
         $res = Install-PreparedMod $prep $ans
         $added = $true
